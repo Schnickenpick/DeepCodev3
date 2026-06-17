@@ -34,13 +34,23 @@ def _prompt_with_patched_stdout(session: PromptSession, prompt_text: str) -> str
     # raw=True: pass ANSI escape codes through untouched (rich.Console writes
     # raw ANSI for colors/styles — without raw=True, prompt_toolkit's Output.write()
     # mangles ESC bytes into literal "?" characters).
+    #
+    # IMPORTANT: while patch_stdout is active, sys.stdout is a StdoutProxy. We
+    # point renderer.console at it so prints during the prompt insert above the
+    # input line. On exit we MUST restore the *real* console file — NOT whatever
+    # console.file happened to be on entry, because that could itself be a stale
+    # StdoutProxy from a re-entrant call. Restoring a dead proxy sends every
+    # subsequent print into a void (this was the "agent replies but nothing shows"
+    # bug). If a full-screen TUI owns the screen, leave its buffer file in place.
     with patch_stdout(raw=True):
-        old_file = renderer.console.file
         renderer.console.file = sys.stdout
         try:
             return session.prompt(prompt_text, style=PROMPT_STYLE)
         finally:
-            renderer.console.file = old_file
+            if renderer.is_tui_active():
+                renderer.console.file = renderer._buffer_file
+            else:
+                renderer.console.file = renderer._real_console_file
 
 
 async def _run_cancelable(coro):
@@ -257,32 +267,15 @@ async def _run_quiz_phase(
         )
         return f"{sys_prompt}{extra}{clarify_instruction}\n\nUser: {user_message}{context_block}\nAssistant:"
 
-    import pathlib as _pl
-    _dbg = _pl.Path.cwd() / "_deepcode_debug.log"
-    def _log(m):
-        try:
-            with _dbg.open("a", encoding="utf-8") as f:
-                f.write(m + "\n")
-        except Exception:
-            pass
-
     context_block = ""
     raw = ""
-    _log(f"[quiz] start, model={model_id}, msg={user_message!r}")
     try:
-        nchunks = 0
         async for chunk in api.stream_chat(_build_prompt(context_block), model_id):
-            nchunks += 1
             if chunk.get("delta"):
                 raw += chunk["delta"]
-            if chunk.get("error"):
-                _log(f"[quiz] error chunk: {chunk['error']}")
             if chunk.get("done"):
                 break
-        _log(f"[quiz] stream done: {nchunks} chunks, raw len={len(raw)}, raw={raw[:120]!r}")
     except Exception as e:
-        import traceback as _tb
-        _log("[quiz] EXCEPTION:\n" + _tb.format_exc())
         renderer.print_error(str(e))
         return user_message, None
 
@@ -1011,17 +1004,6 @@ async def main_loop():
     agent_conversation: list[dict] = []
     stream_task = None
 
-    # DEBUG: absolute-path logger, fixed location, can't be lost to cwd.
-    import os as _os
-    _DBGPATH = _os.path.join(_os.path.expanduser("~"), "deepcode_debug.log")
-    def _DBG(m):
-        try:
-            with open(_DBGPATH, "a", encoding="utf-8") as _f:
-                _f.write(m + "\n")
-        except Exception:
-            pass
-    _DBG(f"=== main_loop started, agent_mode={agent_mode} mode={mode} ===")
-
     while True:
         try:
             indicators = []
@@ -1054,7 +1036,6 @@ async def main_loop():
             break
 
         text = raw.strip()
-        _DBG(f"[loop] got input text={text!r} agent_mode={agent_mode} mode={mode} reasoning={reasoning_level}")
         if not text:
             continue
 
@@ -1338,26 +1319,11 @@ async def main_loop():
             renderer.finish_stream(prefetched)
             content = prefetched
         elif agent_mode and mode == "chat":
-            import traceback as _tb, pathlib as _pl
-            _dbg = _pl.Path.cwd() / "_deepcode_debug.log"
-            try:
-                _dbg.write_text(f"entering agent branch, effective_text={effective_text!r}\n", encoding="utf-8")
-                cancel_result = await _run_cancelable(run_agent(effective_text, agent_conversation, memory_md, user_md, model_id, deepcode_md, project_memory_md))
-                with _dbg.open("a", encoding="utf-8") as f:
-                    f.write(f"run_agent returned: cancel_result is None? {cancel_result is None}\n")
-                    if cancel_result is not None:
-                        f.write(f"raw_agent={cancel_result[0]!r}\n")
-            except Exception as _e:
-                with _dbg.open("a", encoding="utf-8") as f:
-                    f.write("EXCEPTION:\n" + _tb.format_exc())
-                renderer.print_error(f"[debug] agent dispatch raised: {_e}")
-                continue
+            cancel_result = await _run_cancelable(run_agent(effective_text, agent_conversation, memory_md, user_md, model_id, deepcode_md, project_memory_md))
             if cancel_result is None:
                 continue
             raw_agent, agent_conversation = cancel_result
             content, agent_quiz = _parse_quiz(raw_agent, quiz_max_options)
-            with _dbg.open("a", encoding="utf-8") as f:
-                f.write(f"after parse_quiz: content={content!r} quiz={agent_quiz!r}\n")
             # Loop: agent may ask multiple clarifying questions in sequence.
             qa_pairs: list[tuple[str, str]] = []
             while agent_quiz:
