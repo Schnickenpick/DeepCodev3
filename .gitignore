@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+_deepcode_debug.log
+test4/
+testing_run/
+*.log

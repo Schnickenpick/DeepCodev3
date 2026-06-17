@@ -1,0 +1,8 @@
+- User builds single-file three.js physics demos (2D Flappy Bird; 3D destructible building with custom physics).
+- Assistant delivered physics.html and physics3.html with a custom AABB engine: 60 Hz fixed timestep (accumulator, max 4 substeps), sleeping/waking with wake-on-contact propagation, XZ spatial-hash broadphase, AABB SAT with impulse/friction, gravity/restitution/damping, radial-impulse bombs, debris, HUD, reset (R), FPS/fly modes (WASD, mouse, Shift/Space/Ctrl/F).
+- Serve demos over HTTP (e.g., python -m http.server or VS Code Live Server); file:// causes ES module/CORS and pointer-lock issues and yields a gray screen.
+- Pointer lock UX: start overlay requests pointer lock; canvas click fallback; handle rejected promises; on failure, check console, refocus, retry.
+- physics4.html request: single-file three.js with Blender-style orbit (LMB orbit, MMB/RMB pan, wheel zoom, F frame, R reset), LMB bomb firing with charge, B toggles bomb mode, no FPS controls; open via local server.
+- Building: 5-floor destructible structure with running-bond brick walls, slab floors, ground doors, upper windows, roof slab; shared BoxGeometry and 5-tone materials for batching.
+- Performance: cap pixel ratio to 1.5; 1024² shadow map with tight ortho frustum and bias; only slabs/roof cast shadows; debris cap ~220 with auto-expiry; low-segment geometries; sleeping bodies skip work.
+- physics4.html includes unused classic OrbitControls and BufferGeometryUtils scripts that can be removed.

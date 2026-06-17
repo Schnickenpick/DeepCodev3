@@ -1,0 +1,2 @@
+[console_scripts]
+deepcodev3 = deepcodev3.cli:main

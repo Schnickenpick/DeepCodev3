@@ -1,0 +1,1 @@
+- The user is working on an agentic, Claude-Code-like CLI tool named deepcodev3 and is seeking feature ideas for it.
