@@ -303,6 +303,13 @@ def print_info(msg: str):
     console.print(f"  [dim]{msg}[/dim]")
 
 
+def print_user_line(text: str):
+    """Echo a submitted user message into the scrollback (above the pinned
+    input bar) so the transcript reads naturally."""
+    for line in text.splitlines() or [""]:
+        console.print(f"  [{PERMISSION_BLUE}]❯[/{PERMISSION_BLUE}] {line}", markup=True, highlight=False)
+
+
 def render_markdown(text: str):
     console.print(Padding(Markdown(text), pad=(0, 0, 0, 2)))
 

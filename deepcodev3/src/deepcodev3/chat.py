@@ -18,6 +18,7 @@ from .models import DEFAULT_MODEL, find_model, MODELS
 from .agent import run_agent
 from .system_prompt import SYSTEM_PROMPT
 from .reasoning import run_reasoning, LEVELS as REASONING_LEVELS
+from .input_loop import InputController
 
 from .permissions import _getch
 
@@ -54,39 +55,25 @@ def _prompt_with_patched_stdout(session: PromptSession, prompt_text: str) -> str
 
 
 async def _run_cancelable(coro):
-    """Run `coro` as a task; if the user presses Esc while it's running,
-    cancel it and return None instead of the result. Other keystrokes are
-    pushed back onto the input buffer (via msvcrt.ungetwch) so they aren't
-    swallowed. Falls back to a plain await on non-Windows."""
+    """Run `coro` as a task that the user can interrupt by pressing Esc (on an
+    empty input line) while it runs. The persistent input controller owns the
+    keyboard now, so we register this task's cancel as the controller's
+    interrupt callback rather than polling msvcrt ourselves. Returns the coro's
+    result, or None if interrupted."""
     task = asyncio.ensure_future(coro)
-    if sys.platform != "win32":
+    ctrl = _INPUT_CONTROLLER
+    if ctrl is None:
+        # no controller (shouldn't happen in normal REPL) — plain await
         return await task
 
-    import msvcrt
-
-    async def _watch_esc():
-        while not task.done():
-            if msvcrt.kbhit():
-                ch = msvcrt.getwch()
-                if ch == "\x1b":
-                    task.cancel()
-                    return
-                else:
-                    msvcrt.ungetwch(ch)
-            await asyncio.sleep(0.05)
-
-    watcher = asyncio.ensure_future(_watch_esc())
+    ctrl.set_interrupt(task.cancel)
     try:
         result = await task
     except asyncio.CancelledError:
-        renderer.print_info("Cancelled.")
+        renderer.print_info("Interrupted.")
         return None
     finally:
-        watcher.cancel()
-        try:
-            await watcher
-        except (asyncio.CancelledError, Exception):
-            pass
+        ctrl.set_interrupt(None)
     return result
 
 
@@ -107,6 +94,23 @@ def _parse_quiz(text: str, max_options: int) -> tuple[str, dict | None]:
         return clean, data
     except Exception:
         return text, None
+
+
+import contextlib
+
+
+@contextlib.contextmanager
+def _keyboard_for_picker():
+    """Hand the keyboard to a blocking msvcrt picker by pausing the persistent
+    pt input thread for the duration, then restoring it."""
+    ctrl = _INPUT_CONTROLLER
+    if ctrl is not None:
+        ctrl.pause()
+    try:
+        yield
+    finally:
+        if ctrl is not None:
+            ctrl.resume()
 
 
 def _pick_option(options: list[str], session) -> str | None:
@@ -130,34 +134,35 @@ def _pick_option(options: list[str], session) -> str | None:
 
     _render(selected)
 
-    while True:
-        ch = _getch()
-        if ch == "UP":
-            selected = (selected - 1) % total
-        elif ch == "DOWN":
-            selected = (selected + 1) % total
-        elif ch == "ENTER":
-            # clear rendered lines
-            for _ in range(total):
-                sys.stdout.write("\033[1A\033[2K")
-            sys.stdout.flush()
-            if selected == total - 1:
-                return "__free__"
-            renderer.console.print(f"  [dim]❯ {options[selected]}[/dim]")
-            return options[selected]
-        elif ch == "ESC" or ch == "\x03":
-            for _ in range(total):
-                sys.stdout.write("\033[1A\033[2K")
-            sys.stdout.flush()
-            return None
-        else:
-            continue
+    with _keyboard_for_picker():
+        while True:
+            ch = _getch()
+            if ch == "UP":
+                selected = (selected - 1) % total
+            elif ch == "DOWN":
+                selected = (selected + 1) % total
+            elif ch == "ENTER":
+                # clear rendered lines
+                for _ in range(total):
+                    sys.stdout.write("\033[1A\033[2K")
+                sys.stdout.flush()
+                if selected == total - 1:
+                    return "__free__"
+                renderer.console.print(f"  [dim]❯ {options[selected]}[/dim]")
+                return options[selected]
+            elif ch == "ESC" or ch == "\x03":
+                for _ in range(total):
+                    sys.stdout.write("\033[1A\033[2K")
+                sys.stdout.flush()
+                return None
+            else:
+                continue
 
-        # redraw
-        for _ in range(total):
-            sys.stdout.write("\033[1A\033[2K")
-        sys.stdout.flush()
-        _render(selected)
+            # redraw
+            for _ in range(total):
+                sys.stdout.write("\033[1A\033[2K")
+            sys.stdout.flush()
+            _render(selected)
 
 
 def _model_picker(current_model_id: str) -> str | None:
@@ -299,16 +304,12 @@ async def _run_quiz_phase(
             break
 
         if result == "__free__":
-            # "Type something different" chosen
-            try:
-                renderer.print_info("Type your answer:")
-                free_raw = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: session.prompt("  ❯ ", style=PROMPT_STYLE)
-                )
-                answer = free_raw.strip() or "No preference"
-            except (KeyboardInterrupt, EOFError):
+            # "Type something different" chosen — read via the persistent bar
+            renderer.print_info("Type your answer:")
+            free_raw = await _INPUT_CONTROLLER.read_one() if _INPUT_CONTROLLER else None
+            if free_raw is None:
                 break
+            answer = free_raw.strip() or "No preference"
         else:
             answer = result
 
@@ -414,6 +415,11 @@ PROMPT_STYLE = Style.from_dict({
 })
 
 
+# Set to the active InputController so the Esc key binding can fire an interrupt
+# of the in-flight agent turn from the input thread.
+_INPUT_CONTROLLER = None
+
+
 def _make_bindings() -> KeyBindings:
     kb = KeyBindings()
 
@@ -428,6 +434,17 @@ def _make_bindings() -> KeyBindings:
     @kb.add("escape", "enter")
     def _newline_alt(event):
         event.current_buffer.insert_text("\n")
+
+    # Esc on an EMPTY input while a turn is running → interrupt that turn.
+    # If there's text in the buffer, Esc is left to prompt_toolkit (so it can
+    # still be used as a meta-prefix / does nothing destructive to your typing).
+    @kb.add("escape", eager=True)
+    def _interrupt(event):
+        buf = event.current_buffer
+        if buf.text.strip():
+            return  # don't interrupt while the user is mid-typing a message
+        if _INPUT_CONTROLLER is not None:
+            _INPUT_CONTROLLER.fire_interrupt()
 
     return kb
 
@@ -683,14 +700,11 @@ async def _run_plan(
         return agent_conversation
 
     if choice == "__free__" or choice == "Refine the plan":
-        try:
-            renderer.print_info("What should be changed?")
-            feedback = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: session.prompt("  ❯ ", style=PROMPT_STYLE)
-            )
-            feedback = feedback.strip()
-        except (KeyboardInterrupt, EOFError):
+        renderer.print_info("What should be changed?")
+        feedback = await _INPUT_CONTROLLER.read_one() if _INPUT_CONTROLLER else None
+        if feedback is None:
             return agent_conversation
+        feedback = feedback.strip()
 
         refine_prompt = (
             f"{extra}Here is a plan for: {task}\n\n{plan_text}\n\n"
@@ -754,14 +768,11 @@ async def _run_plan(
         if result is None:
             break
         if result == "__free__":
-            try:
-                renderer.print_info("Type your answer:")
-                free = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: session.prompt("  ❯ ", style=PROMPT_STYLE)
-                )
-                answer = free.strip() or "No preference"
-            except (KeyboardInterrupt, EOFError):
+            renderer.print_info("Type your answer:")
+            free = await _INPUT_CONTROLLER.read_one() if _INPUT_CONTROLLER else None
+            if free is None:
                 break
+            answer = free.strip() or "No preference"
         else:
             answer = result
         qa_pairs.append((question or f"Question {len(qa_pairs)+1}", answer))
@@ -974,7 +985,15 @@ async def main_loop():
         if agent_mode:      parts.append("agent")
         if mode != "chat":  parts.append(mode)
         if reasoning_level: parts.append(f"reasoning:{reasoning_level}")
-        return "  " + "  ·  ".join(parts) + " "
+        bar = "  " + "  ·  ".join(parts) + " "
+        # show queued messages + running-turn hint
+        ctrl = _INPUT_CONTROLLER
+        if ctrl is not None:
+            if ctrl.pending:
+                bar += f"  ·  {len(ctrl.pending)} queued"
+            if ctrl._busy:
+                bar += "  ·  running (Esc to interrupt)"
+        return bar
 
     session = PromptSession(
         history=FileHistory(str(history_path)),
@@ -986,6 +1005,20 @@ async def main_loop():
         multiline=True,
         bottom_toolbar=_toolbar,
     )
+
+    def _prompt_text():
+        indicators = []
+        if agent_mode:          indicators.append("agent")
+        if mode == "merge":     indicators.append("merge")
+        elif mode == "search":  indicators.append("search")
+        if reasoning_level:     indicators.append(f"reasoning:{reasoning_level}")
+        prefix = f"[{', '.join(indicators)}] " if indicators else ""
+        return f"\n  {prefix}❯ "
+
+    global _INPUT_CONTROLLER
+    controller = InputController(session, _prompt_text)
+    _INPUT_CONTROLLER = controller
+    controller.start(asyncio.get_event_loop())
 
     renderer.print_banner(model_id)
     renderer.print_model_status(model_id, mode, agent_mode)
@@ -1004,40 +1037,25 @@ async def main_loop():
     agent_conversation: list[dict] = []
     stream_task = None
 
-    while True:
-        try:
-            indicators = []
-            if agent_mode:          indicators.append("agent")
-            if mode == "merge":     indicators.append("merge")
-            elif mode == "search":  indicators.append("search")
-            if reasoning_level:     indicators.append(f"reasoning:{reasoning_level}")
-            prefix = f"[{', '.join(indicators)}] " if indicators else ""
-
-            raw = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: _prompt_with_patched_stdout(session, f"\n  {prefix}❯ ")
-            )
-        except KeyboardInterrupt:
-            try:
-                confirm = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: _prompt_with_patched_stdout(session, "\n  Exit DeepCode? [y/N] ")
-                )
-            except (KeyboardInterrupt, EOFError):
-                renderer.print_info("\nBye!")
-                break
-            if confirm.strip().lower() == "y":
-                renderer.print_info("Bye!")
-                break
-            renderer.print_info("Continuing...")
-            continue
-        except EOFError:
+    try:
+      while True:
+        raw = await controller.get_line()
+        if raw is None:
+            # EOF / Ctrl-D / shutdown
             renderer.print_info("\nBye!")
             break
 
         text = raw.strip()
         if not text:
             continue
+
+        # Reflect any further already-queued submissions in the toolbar. The
+        # input thread keeps filling the queue while we process; pending mirrors
+        # what's waiting so the bottom bar can show "N queued".
+        controller.pending = list(controller._q.queue)
+        # Echo the submitted line into the scrollback so it stays visible above
+        # the (now cleared) input bar, like a real chat transcript.
+        renderer.print_user_line(text)
 
         if text.startswith("/"):
             parts = text.split(None, 1)
@@ -1334,14 +1352,11 @@ async def main_loop():
                 if result is None:
                     break
                 if result == "__free__":
-                    try:
-                        renderer.print_info("Type your answer:")
-                        free = await asyncio.get_event_loop().run_in_executor(
-                            None, lambda: session.prompt("  ❯ ", style=PROMPT_STYLE)
-                        )
-                        answer = free.strip() or "No preference"
-                    except (KeyboardInterrupt, EOFError):
+                    renderer.print_info("Type your answer:")
+                    free = await _INPUT_CONTROLLER.read_one() if _INPUT_CONTROLLER else None
+                    if free is None:
                         break
+                    answer = free.strip() or "No preference"
                 else:
                     answer = result
                 qa_pairs.append((question or f"Question {len(qa_pairs)+1}", answer))
@@ -1370,11 +1385,20 @@ async def main_loop():
             if project_memory_md:
                 memory_block += f"\n\n[Project memory:\n{project_memory_md}\n]"
             renderer.print_assistant_header(model_id)
-            raw_content = await run_reasoning(effective_text, model_id, reasoning_level, sys_prompt, memory_block.strip())
+            raw_content = await _run_cancelable(
+                run_reasoning(effective_text, model_id, reasoning_level, sys_prompt, memory_block.strip())
+            )
+            if raw_content is None:
+                continue
             content, _ = _parse_quiz(raw_content, quiz_max_options)
             renderer.finish_stream(content)
         else:
-            raw_content, reasoning = await run_chat_stream(effective_text, model_id, mode, memory_md, deepcode_md, sys_prompt)
+            cr = await _run_cancelable(
+                run_chat_stream(effective_text, model_id, mode, memory_md, deepcode_md, sys_prompt)
+            )
+            if cr is None:
+                continue
+            raw_content, reasoning = cr
             content, _ = _parse_quiz(raw_content, quiz_max_options)
 
         if content:
@@ -1416,6 +1440,9 @@ async def main_loop():
                     if storage.needs_compression(user_md, storage.USER_MD_MAX_CHARS):
                         user_md = await api.compress_memory(user_md, "user identity")
                     storage.save_user_md(user_md)
+    finally:
+        controller.stop()
+        _INPUT_CONTROLLER = None
 
 
 async def _set_title(session_obj: dict, first_msg: str, model_id: str):
