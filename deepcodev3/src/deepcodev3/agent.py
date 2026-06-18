@@ -342,7 +342,7 @@ async def run_agent(user_message: str, conversation: list[dict], memory_md: str,
                     await asyncio.shield(dot_task)
                 except Exception:
                     pass
-                if not renderer.is_tui_active() and not swarm_mode:
+                if not renderer.is_tui_active() and not swarm_mode and not renderer.is_bottom_bar_active():
                     sys.stdout.write("\033[2K\r")
                     sys.stdout.flush()
 
@@ -354,7 +354,9 @@ async def run_agent(user_message: str, conversation: list[dict], memory_md: str,
             RESET = "\033[0m"
             try:
                 while _show_thinking_dot:
-                    if not renderer.is_tui_active() and not swarm_mode:
+                    # Suppressed when the bottom bar owns the screen — the bar's
+                    # mode line shows live tokens/elapsed instead of a \r spinner.
+                    if not renderer.is_tui_active() and not swarm_mode and not renderer.is_bottom_bar_active():
                         sys.stdout.write(f"\r  {LIGHT_BLUE}{frames[i % len(frames)]} Thinking…{RESET}")
                         sys.stdout.flush()
                     i += 1

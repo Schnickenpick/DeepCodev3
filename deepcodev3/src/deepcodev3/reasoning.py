@@ -53,10 +53,16 @@ def _safe_write(s: str):
 
 
 def _status(msg: str):
+    # The bottom input bar owns the screen bottom — a raw \r spinner would land
+    # on the input box, so skip it (rich reasoning panels still print above).
+    if renderer.is_bottom_bar_active():
+        return
     _safe_write(f"  \033[2m⏳ {msg}\033[0m\r")
 
 
 def _clear_status():
+    if renderer.is_bottom_bar_active():
+        return
     _safe_write("\033[2K\r")
 
 

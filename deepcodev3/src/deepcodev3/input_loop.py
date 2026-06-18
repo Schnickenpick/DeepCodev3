@@ -229,12 +229,14 @@ class InputController:
         self._patch_cm.__enter__()
         import sys
         renderer.console.file = sys.stdout
+        renderer.set_bottom_bar_active(True)
         self._thread = threading.Thread(target=self._run, name="deepcode-input", daemon=True)
         self._thread.start()
 
     def stop(self):
         self._stop.set()
         self._eof.set()
+        renderer.set_bottom_bar_active(False)
         try:
             if self._app is not None and self._app.is_running:
                 self._app.exit(result=None, exception=EOFError)

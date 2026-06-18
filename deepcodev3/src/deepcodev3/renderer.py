@@ -21,6 +21,19 @@ _notify = True
 # alt-screen buffer. Route console output to a black hole instead.
 _real_console_file = console.file
 _tui_active = False
+# True while the persistent bottom input bar (InputController) owns the bottom
+# of the screen. Raw \r-overwrite spinners must NOT draw then — they'd land on
+# the input box. The bar's mode line shows live tokens/elapsed instead.
+_bottom_bar_active = False
+
+
+def set_bottom_bar_active(active: bool):
+    global _bottom_bar_active
+    _bottom_bar_active = active
+
+
+def is_bottom_bar_active() -> bool:
+    return _bottom_bar_active
 
 
 class _BufferFile:
