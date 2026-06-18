@@ -388,9 +388,19 @@ async def run_agent(user_message: str, conversation: list[dict], memory_md: str,
         # Detect a truncated/unclosed <tool> call — model hit its output limit
         # mid-JSON (e.g. a huge write_file). Don't show the raw JSON to the
         # user; tell the model to retry in smaller chunks instead.
+        #
+        # Guard against FALSE positives: prose can mention "<tool>" literally
+        # (e.g. a summary describing the tool format, or text inside backticks).
+        # A real truncated call is an unclosed <tool> immediately followed by a
+        # JSON object open `{` AND not wrapped in an inline-code backtick span.
         if not tool_calls and "<tool>" in full_response:
             last_open = full_response.rfind("<tool>")
-            if "</tool>" not in full_response[last_open:]:
+            after = full_response[last_open + len("<tool>"):]
+            looks_like_call = re.match(r'\s*\{', after) is not None
+            # mentioned inside an inline code span like `...<tool>...` → prose
+            in_backticks = full_response[:last_open].count("`") % 2 == 1
+            if (looks_like_call and not in_backticks
+                    and "</tool>" not in full_response[last_open:]):
                 truncated_text = full_response[:last_open].strip()
                 truncated_text = QUIZ_RE.sub("", truncated_text).strip()
                 if truncated_text and not swarm_mode:

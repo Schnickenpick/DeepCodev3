@@ -320,6 +320,8 @@ async def _run_quiz_phase(
 
 COMMANDS = [
     ("/notify",         "Toggle bell notification on/off"),
+    ("/color",          "Set UI accent color — e.g. /color blue, /color #78aaff"),
+    ("/context",        "Scan project for context — /context on|off to toggle auto-scan"),
     ("/reasoning",      "Set reasoning level — off/low/middle/high/ultra"),
     ("/agent",          "Toggle agent mode (file/shell tools)"),
     ("/model",          "Switch model — e.g. /model opus"),
@@ -375,6 +377,17 @@ class DeepCompleter(Completer):
                         start_position=-len(parts[1]),
                         display=HTML(f"<b>{m['name']}</b>"),
                         display_meta=m["provider"],
+                    )
+        elif cmd == "/color":
+            from . import renderer as _r
+            partial = parts[1].lower()
+            for name, rgb in _r.ACCENT_PRESETS.items():
+                if name.startswith(partial):
+                    yield Completion(
+                        name,
+                        start_position=-len(parts[1]),
+                        display=HTML(f"<b>{name}</b>"),
+                        display_meta=rgb,
                     )
 
 
@@ -498,6 +511,86 @@ async def _compact_conversation(conversation: list[dict], model_id: str) -> str:
     except Exception as e:
         renderer.print_error(str(e))
         return ""
+
+
+def _seed_dir_listing(max_entries: int = 60) -> str:
+    """Cheap deterministic listing of the cwd (one level), names + sizes, dirs
+    marked. Seeds the bootstrap so the agent doesn't burn a turn on the first
+    list_dir. The agent can list_dir deeper (e.g. docs/) on its own."""
+    import os
+    from pathlib import Path
+    SKIP = {".git", "__pycache__", "node_modules", ".venv", "venv", ".idea",
+            ".vscode", "dist", "build", ".mypy_cache", ".pytest_cache"}
+    lines = []
+    try:
+        entries = sorted(os.scandir("."), key=lambda e: (not e.is_dir(), e.name.lower()))
+    except OSError:
+        return ""
+    for e in entries[:max_entries]:
+        if e.name in SKIP or e.name.startswith(".") and e.is_dir():
+            continue
+        if e.is_dir():
+            lines.append(f"  {e.name}/   (dir)")
+        else:
+            try:
+                size = e.stat().st_size
+            except OSError:
+                size = 0
+            sz = f"{size}b" if size < 1024 else f"{size//1024}kb"
+            lines.append(f"  {e.name}   ({sz})")
+    return "\n".join(lines)
+
+
+async def _bootstrap_context(
+    model_id: str,
+    memory_md: str,
+    user_md: str,
+    deepcode_md: str,
+    project_memory_md: str,
+) -> str:
+    """Explore the working directory and return a compact 'project orientation'
+    note (a few hundred tokens). Uses the agent's real tool loop so the MODEL
+    decides what's worth reading (factoring file name + size), can recurse into
+    subdirs (docs/, src/, ...), and reads selectively without blowing context.
+    Returns the summary text, or "" on failure / empty dir."""
+    from pathlib import Path
+    listing = _seed_dir_listing()
+    if not listing.strip():
+        return ""
+
+    task = (
+        "You are starting a fresh session in this working directory. Build a "
+        "brief mental model of the project for yourself.\n\n"
+        f"Working directory: {Path.cwd()}\n"
+        "Top-level contents (name and size):\n"
+        f"{listing}\n\n"
+        "Do this:\n"
+        "1. Decide which files look important from their NAME and SIZE — prefer "
+        "README, docs, config/manifest files (package.json, pyproject, Cargo.toml, "
+        "go.mod...), and obvious entrypoints. SKIP huge files, lockfiles, binaries, "
+        "and generated output.\n"
+        "2. Use list_dir to look inside promising subdirectories (e.g. docs/, src/) "
+        "and read selectively in there too — go deeper only where it pays off.\n"
+        "3. read_file the chosen files. Do NOT read everything; stay cheap. Skip a "
+        "file if it's large and unlikely to matter.\n"
+        "4. When done, reply with a SHORT orientation note (<=200 words): what this "
+        "project is, its layout, the key files and what they do, and how to run it "
+        "if obvious. No preamble, no file dumps — just the note."
+    )
+
+    conv: list[dict] = []
+    try:
+        result = await _run_cancelable(
+            run_agent(task, conv, memory_md, user_md, model_id,
+                      deepcode_md, project_memory_md)
+        )
+    except Exception as e:
+        renderer.print_error(f"Auto-context failed: {e}")
+        return ""
+    if not result:
+        return ""
+    summary, _conv = result
+    return (summary or "").strip()
 
 
 def _session_browser(sessions: list[dict]) -> dict | None:
@@ -944,6 +1037,10 @@ async def main_loop():
 
     permissions.set_mode(cfg.get("perm_mode", permissions.MODE_DEFAULT))
 
+    # accent color (/color) — apply before banner so the logo renders in it
+    accent_rgb = renderer.resolve_color(cfg.get("accent", "orange")) or renderer.ACCENT
+    renderer.set_accent(accent_rgb)
+
     def _cycle_perm_mode():
         new_mode = permissions.cycle_mode()
         cfg["perm_mode"] = new_mode
@@ -964,6 +1061,7 @@ async def main_loop():
         mode_line_fn=_mode_line,
         mode_cycle_cb=_cycle_perm_mode,
         prompt_symbol="❯ ",
+        accent=renderer.accent_hex(),
     )
     _INPUT_CONTROLLER = controller
     controller.start(asyncio.get_event_loop())
@@ -984,6 +1082,36 @@ async def main_loop():
     current_session = storage.new_session(model_id)
     agent_conversation: list[dict] = []
     stream_task = None
+
+    auto_context = cfg.get("auto_context", True)
+
+    async def _run_bootstrap():
+        """Explore the project and inject a compact orientation note into the
+        conversation. Needs tools, so it temporarily uses the agent loop."""
+        from rich.panel import Panel
+        from rich.padding import Padding
+        from rich.text import Text
+        from rich import box
+        renderer.print_info("Scanning project for context...")
+        summary = await _bootstrap_context(
+            model_id, memory_md, user_md, deepcode_md, project_memory_md)
+        if not summary:
+            renderer.print_info("No project context gathered.")
+            return
+        note = f"[Project context]\n{summary}"
+        agent_conversation.append({"role": "assistant", "content": note})
+        current_session["messages"].append(
+            {"role": "assistant", "content": note, "model": model_id})
+        renderer.console.print()
+        renderer.console.print(Padding(
+            Panel(Text(summary, style="white"),
+                  title=f"[{renderer.CLAUDE_ORANGE} bold]Project context[/{renderer.CLAUDE_ORANGE} bold]",
+                  border_style=renderer.SUBTLE_GRAY, box=box.ROUNDED, padding=(0, 1)),
+            pad=(0, 0, 0, 1)))
+        renderer.console.print()
+
+    if auto_context:
+        await _run_bootstrap()
 
     try:
       while True:
@@ -1048,6 +1176,8 @@ async def main_loop():
                         }]
                         agent_conversation = [{"role": "user", "content": f"[Conversation summary]\n{summary}"}]
                         renderer.print_info("Conversation compacted.")
+                        if auto_context:
+                            await _run_bootstrap()
 
             elif cmd == "/model":
                 if arg:
@@ -1144,6 +1274,42 @@ async def main_loop():
                 else:
                     renderer.print_error(f"Unknown level '{lvl}'. Use: off, low, middle, high, ultra")
                 storage.save_config(cfg)
+
+            elif cmd == "/color":
+                spec = arg.strip()
+                if not spec:
+                    names = ", ".join(renderer.ACCENT_PRESETS.keys())
+                    cur = cfg.get("accent", "orange")
+                    renderer.print_info(f"Current color: {cur}. Usage: /color <name|#hex|rgb(r,g,b)>")
+                    renderer.print_info(f"Presets: {names}")
+                else:
+                    resolved = renderer.resolve_color(spec)
+                    if resolved is None:
+                        renderer.print_error(f"Bad color '{spec}'. Try a preset name, #rrggbb, or rgb(r,g,b).")
+                    else:
+                        renderer.set_accent(resolved)
+                        controller.set_accent(renderer.accent_hex())
+                        cfg["accent"] = spec.lower()
+                        storage.save_config(cfg)
+                        renderer.console.clear()
+                        renderer.print_banner(model_id)
+                        renderer.print_model_status(model_id, mode, agent_mode)
+                        renderer.print_info(f"Color set to {spec}.")
+
+            elif cmd == "/context":
+                sub = arg.strip().lower()
+                if sub == "off":
+                    auto_context = False
+                    cfg["auto_context"] = False
+                    storage.save_config(cfg)
+                    renderer.print_info("Auto-context OFF (won't scan on start/compact).")
+                elif sub == "on":
+                    auto_context = True
+                    cfg["auto_context"] = True
+                    storage.save_config(cfg)
+                    renderer.print_info("Auto-context ON.")
+                else:
+                    await _run_bootstrap()
 
             elif cmd == "/notify":
                 new_state = not renderer._notify
