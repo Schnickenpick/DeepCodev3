@@ -12,15 +12,12 @@ OPTION_ALLOW_ALWAYS = "allow_always"
 OPTION_DENY        = "deny"
 OPTION_DENY_ALWAYS = "deny_always"
 
-# ── permission modes (cycled with shift+tab) ──────────────────────────────────
-# default      : prompt for every non-read tool call (the safe baseline)
-# accept_edits : auto-allow file writes/edits (and reads); still prompt for
-#                shell commands and network fetches
-# auto         : auto-allow ALL tool calls (hard-deny patterns still apply)
+# ── permission modes (toggled with shift+tab) ─────────────────────────────────
+# default : prompt before every non-read tool call (the safe baseline)
+# auto    : auto-allow ALL tool calls (hard-deny patterns still apply)
 MODE_DEFAULT = "default"
-MODE_ACCEPT_EDITS = "accept_edits"
 MODE_AUTO = "auto"
-_MODE_CYCLE = [MODE_DEFAULT, MODE_ACCEPT_EDITS, MODE_AUTO]
+_MODE_CYCLE = [MODE_DEFAULT, MODE_AUTO]
 
 _mode = MODE_DEFAULT
 
@@ -36,7 +33,7 @@ def set_mode(mode: str):
 
 
 def cycle_mode() -> str:
-    """Advance to the next permission mode (shift+tab). Returns the new mode."""
+    """Toggle the permission mode (shift+tab). Returns the new mode."""
     global _mode
     i = _MODE_CYCLE.index(_mode) if _mode in _MODE_CYCLE else 0
     _mode = _MODE_CYCLE[(i + 1) % len(_MODE_CYCLE)]
@@ -47,8 +44,6 @@ def mode_label(mode: str | None = None) -> str:
     m = mode or _mode
     if m == MODE_AUTO:
         return "⏵⏵ auto mode on (shift+tab to cycle)"
-    if m == MODE_ACCEPT_EDITS:
-        return "⏵⏵ accept edits on (shift+tab to cycle)"
     return "⏵  confirm tool calls (shift+tab to cycle)"
 
 _OPTIONS = [
@@ -346,8 +341,6 @@ def ask_permission(tool_name: str, args: dict) -> str:
 
     # permission mode short-circuits the interactive picker
     if _mode == MODE_AUTO:
-        return OPTION_ALLOW
-    if _mode == MODE_ACCEPT_EDITS and category == "write":
         return OPTION_ALLOW
 
     choice = _prompt_choice(tool_name, args)
