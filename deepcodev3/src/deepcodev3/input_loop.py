@@ -316,11 +316,8 @@ class InputController:
             self.textarea.buffer.reset()
             try:
                 line = self._app.run()
-            except EOFError:
-                self._q.put(None)
-                return
-            except (KeyboardInterrupt,):
-                self._q.put(None)
+            except (EOFError, KeyboardInterrupt):
+                self._eof.set()
                 return
             except Exception:
                 continue
