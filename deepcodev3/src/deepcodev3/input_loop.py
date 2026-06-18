@@ -18,7 +18,6 @@ blocking msvcrt picker.
 from __future__ import annotations
 
 import asyncio
-import queue as _queue
 import threading
 from typing import Callable, Optional
 
@@ -53,13 +52,17 @@ class InputController:
         self._mode_line_fn = mode_line_fn
         self._prompt_symbol = prompt_symbol
 
-        self._q: "_queue.Queue[Optional[str]]" = _queue.Queue()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self._eof = threading.Event()
         self._patch_cm = None
 
+        # Single source of truth for submitted-but-unprocessed messages.
+        # The input thread appends; the async loop pops from the front; the
+        # Up-arrow binding pops from the back to edit. Guarded by _plock.
         self.pending: list[str] = []
+        self._plock = threading.Lock()
         self._interrupt_cb: Optional[Callable[[], None]] = None
         self._busy = False
 
@@ -98,8 +101,41 @@ class InputController:
                 return  # don't interrupt while composing
             self.fire_interrupt()
 
+        @kb.add("up")
+        def _up(event):
+            buf = self.textarea.buffer
+            # If the box is empty and there are queued messages, pull the most
+            # recent queued one back into the box for editing (and unqueue it).
+            if not buf.text and self._has_pending():
+                msg = self._pop_last_pending()
+                if msg is not None:
+                    buf.text = msg
+                    buf.cursor_position = len(msg)
+                return
+            # Otherwise normal multiline / history up-navigation.
+            if buf.document.cursor_position_row > 0:
+                buf.cursor_up()
+            else:
+                buf.history_backward()
+
+        @kb.add("down")
+        def _down(event):
+            buf = self.textarea.buffer
+            if buf.document.cursor_position_row < buf.document.line_count - 1:
+                buf.cursor_down()
+            else:
+                buf.history_forward()
+
+        from prompt_toolkit.layout.dimension import Dimension
+        # Height grows with the user's input (1 line default, +1 per newline),
+        # capped so a huge paste doesn't eat the screen. The Frame adds the
+        # box border around this.
+        def _input_height():
+            n = self.textarea.buffer.text.count("\n") + 1
+            return Dimension(min=1, preferred=min(n, 10), max=10)
+
         self.textarea = TextArea(
-            height=None,
+            height=_input_height,
             prompt=self._prompt_symbol,
             multiline=True,
             wrap_lines=True,
@@ -110,11 +146,32 @@ class InputController:
             scrollbar=False,
         )
 
+        # queued messages shown dim ABOVE the box (Claude-Code style). Press Up
+        # on an empty box to pull the most recent one back for editing.
+        def _queued_text():
+            with self._plock:
+                items = list(self.pending)
+            if not items:
+                return []
+            out = []
+            for m in items:
+                first = m.splitlines()[0] if m else m
+                if len(first) > 80:
+                    first = first[:77] + "…"
+                out.append(("class:queued", f"  ❯ {first}\n"))
+            return out
+
+        def _queued_height():
+            with self._plock:
+                return len(self.pending)
+
         # mode line below the box, e.g. "  ⏵⏵ agent · opus 4.7 · 1 queued"
         def _mode_text():
             return [("class:modeline", "  " + self._mode_line_fn())]
 
         body = HSplit([
+            Window(FormattedTextControl(_queued_text), height=_queued_height,
+                   always_hide_cursor=True),
             Frame(self.textarea),
             Window(FormattedTextControl(_mode_text), height=1, always_hide_cursor=True),
         ])
@@ -134,6 +191,7 @@ class InputController:
         base_style = {
             "frame.border": "fg:#505050",
             "modeline": "fg:#888888",
+            "queued": "fg:#666666 italic",
             "completion-menu.completion": "bg:#1c1c1c fg:#bbbbbb",
             "completion-menu.completion.current": "bg:#b1b9f9 fg:#000000",
             "completion-menu.meta.completion": "bg:#1c1c1c fg:#777777",
@@ -170,7 +228,7 @@ class InputController:
 
     def stop(self):
         self._stop.set()
-        self._q.put(None)
+        self._eof.set()
         try:
             if self._app is not None and self._app.is_running:
                 self._app.exit(result=None, exception=EOFError)
@@ -231,9 +289,14 @@ class InputController:
             if self._paused.is_set():
                 continue
             if line is None:
-                self._q.put(None)
+                self._eof.set()
                 return
-            self._q.put(line)
+            line = line.strip()
+            if not line:
+                continue
+            with self._plock:
+                self.pending.append(line)
+            self._invalidate()
 
     # ── pause/resume for blocking pickers ─────────────────────────────────────
 
@@ -258,15 +321,39 @@ class InputController:
         except Exception:
             return False
 
+    # ── pending queue helpers (thread-safe) ───────────────────────────────────
+
+    def _has_pending(self) -> bool:
+        with self._plock:
+            return bool(self.pending)
+
+    def _pop_last_pending(self) -> Optional[str]:
+        """Up-arrow: take the most recently queued message back for editing."""
+        with self._plock:
+            if self.pending:
+                return self.pending.pop()
+        return None
+
+    def _pop_first_pending(self) -> Optional[str]:
+        with self._plock:
+            if self.pending:
+                return self.pending.pop(0)
+        return None
+
     # ── async consumption ─────────────────────────────────────────────────────
 
     async def get_line(self) -> Optional[str]:
+        """Await the next message: FIFO from the pending queue. Returns None on
+        EOF/shutdown (only once the queue is drained)."""
         assert self._loop is not None
         while True:
-            try:
-                return self._q.get_nowait()
-            except _queue.Empty:
-                await asyncio.sleep(0.02)
+            msg = self._pop_first_pending()
+            if msg is not None:
+                self._invalidate()
+                return msg
+            if self._eof.is_set() or self._stop.is_set():
+                return None
+            await asyncio.sleep(0.02)
 
     async def read_one(self) -> Optional[str]:
         return await self.get_line()
