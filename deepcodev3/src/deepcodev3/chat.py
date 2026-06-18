@@ -1038,12 +1038,9 @@ async def main_loop():
         if not text:
             continue
 
-        # Reflect any further already-queued submissions in the toolbar. The
-        # input thread keeps filling the queue while we process; pending mirrors
-        # what's waiting so the bottom bar can show "N queued".
-        controller.pending = list(controller._q.queue)
-        # Echo the submitted line into the scrollback so it stays visible above
-        # the (now cleared) input bar, like a real chat transcript.
+        # pending is maintained inside the controller (the input thread appends,
+        # get_line popped this one off the front). Echo the submitted line into
+        # the scrollback so it stays visible above the input bar.
         renderer.print_user_line(text)
 
         if text.startswith("/"):
