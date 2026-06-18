@@ -65,6 +65,10 @@ class InputController:
         self._plock = threading.Lock()
         self._interrupt_cb: Optional[Callable[[], None]] = None
         self._busy = False
+        # live turn stats for the status line (set by the dispatch via
+        # begin_turn / update_turn / end_turn)
+        self._turn_start: Optional[float] = None
+        self._turn_tokens: int = 0
 
         self._paused = threading.Event()
         self._resumed = threading.Event()
@@ -263,6 +267,30 @@ class InputController:
                 self._app.invalidate()
         except Exception:
             pass
+
+    # ── live turn status (for the mode line) ──────────────────────────────────
+
+    def begin_turn(self):
+        import time
+        self._turn_start = time.time()
+        self._turn_tokens = 0
+
+    def update_turn(self, tokens: int):
+        self._turn_tokens = tokens
+
+    def end_turn(self):
+        self._turn_start = None
+        self._turn_tokens = 0
+
+    def status_suffix(self) -> str:
+        """Live '· 1.2k tok · 8s · Esc to interrupt' shown while a turn runs."""
+        if self._turn_start is None:
+            return ""
+        import time
+        elapsed = time.time() - self._turn_start
+        tok = self._turn_tokens
+        tok_s = f"{tok/1000:.1f}k" if tok >= 1000 else str(tok)
+        return f"  ·  {tok_s} tok  ·  {elapsed:.0f}s  ·  Esc to interrupt"
 
     # ── input thread ──────────────────────────────────────────────────────────
 

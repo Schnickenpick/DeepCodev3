@@ -39,6 +39,7 @@ async def _run_cancelable(coro):
         return await task
 
     ctrl.set_interrupt(task.cancel)
+    ctrl.begin_turn()
     try:
         result = await task
     except asyncio.CancelledError:
@@ -46,6 +47,7 @@ async def _run_cancelable(coro):
         return None
     finally:
         ctrl.set_interrupt(None)
+        ctrl.end_turn()
     return result
 
 
@@ -936,8 +938,16 @@ async def main_loop():
             if ctrl.pending:
                 line += f"  ·  {len(ctrl.pending)} queued"
             if ctrl._busy:
-                line += "  ·  running (Esc to interrupt)"
+                # live token count + elapsed + interrupt hint
+                line += ctrl.status_suffix() or "  ·  running (Esc to interrupt)"
         return line
+
+    def _turn_event(ev: dict):
+        # accumulate live token count for the status line
+        if ev.get("type") == "tokens":
+            ctrl = _INPUT_CONTROLLER
+            if ctrl is not None:
+                ctrl.update_turn(ctrl._turn_tokens + int(ev.get("count", 0)))
 
     global _INPUT_CONTROLLER
     controller = InputController(
@@ -1264,7 +1274,7 @@ async def main_loop():
             renderer.finish_stream(prefetched)
             content = prefetched
         elif agent_mode and mode == "chat":
-            cancel_result = await _run_cancelable(run_agent(effective_text, agent_conversation, memory_md, user_md, model_id, deepcode_md, project_memory_md))
+            cancel_result = await _run_cancelable(run_agent(effective_text, agent_conversation, memory_md, user_md, model_id, deepcode_md, project_memory_md, on_event=_turn_event))
             if cancel_result is None:
                 continue
             raw_agent, agent_conversation = cancel_result
