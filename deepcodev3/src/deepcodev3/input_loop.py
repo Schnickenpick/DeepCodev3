@@ -127,12 +127,14 @@ class InputController:
                 buf.history_forward()
 
         from prompt_toolkit.layout.dimension import Dimension
-        # Height grows with the user's input (1 line default, +1 per newline),
-        # capped so a huge paste doesn't eat the screen. The Frame adds the
-        # box border around this.
+        # Height EXACTLY tracks the input's wrapped line count: 1 line by
+        # default, growing downward as the user adds lines (capped at 10 so a
+        # huge paste can't eat the screen). No slack — preferred==max==content
+        # so the box never reserves extra rows. The Frame adds the border.
         def _input_height():
-            n = self.textarea.buffer.text.count("\n") + 1
-            return Dimension(min=1, preferred=min(n, 10), max=10)
+            rows = self.textarea.buffer.document.line_count
+            rows = max(1, min(rows, 10))
+            return Dimension(min=1, preferred=rows, max=rows)
 
         self.textarea = TextArea(
             height=_input_height,
