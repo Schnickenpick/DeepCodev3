@@ -1,23 +1,19 @@
-"""Persistent bottom-anchored input for the DeepCode REPL.
+"""Persistent bottom-anchored input bar for the DeepCode REPL (Claude-Code style).
 
-Design (chosen to reuse the existing rich renderer and avoid a full-screen
-prompt_toolkit Application, which is fragile on Win32 — see
-ultracode-workflows-lessons):
+The input is a small prompt_toolkit Application — a bordered TextArea (the box)
+with a mode line beneath it — rendered at the bottom of the terminal. It is NOT
+full-screen: `patch_stdout(raw=True)` is held for the whole session, so every
+rich write to stdout is inserted ABOVE the bar and the bar stays pinned at the
+bottom while the agent streams.
 
-- `patch_stdout(raw=True)` is held for the WHOLE session. Every rich write to
-  stdout is inserted ABOVE the live input line, so the prompt stays pinned at
-  the bottom while the agent streams output above it.
-- A dedicated daemon thread runs `session.prompt()` in a loop and pushes each
-  submitted line onto a thread-safe queue. The async main loop pulls from that
-  queue. Because input runs in its own thread, you can type (and queue) the
-  next message while the agent is still streaming.
-- Multiple submissions stack: each Enter enqueues another message; they are
-  processed in order once the current turn finishes.
-- Esc while a turn is running fires an interrupt callback (cancels the in-flight
-  asyncio task). Esc when idle does nothing.
+The Application runs in a daemon thread; each submitted line is pushed onto a
+thread-safe queue the async main loop pulls from. So you can type/queue the next
+message while the agent is still streaming. Multiple submissions stack and are
+processed in order. Esc on an empty box interrupts the running turn.
 
-The InputController owns the PromptSession and the queue. main_loop() asks it
-for the next line via `await get_line()`.
+main_loop() drives it: `await get_line()` for the next message; set_interrupt()
+to register what Esc cancels; pause()/resume() to hand the keyboard to a
+blocking msvcrt picker.
 """
 from __future__ import annotations
 
@@ -26,46 +22,125 @@ import queue as _queue
 import threading
 from typing import Callable, Optional
 
-from prompt_toolkit import PromptSession
+from prompt_toolkit.application import Application
+from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.completion import Completer
+from prompt_toolkit.history import FileHistory, History
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import Layout, HSplit, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.styles import Style
+from prompt_toolkit.widgets import TextArea, Frame
 
 from . import renderer
 
 
 class InputController:
-    def __init__(self, session: PromptSession, prompt_fn: Callable[[], str]):
-        """
-        session   : the configured PromptSession (history, completer, kb, toolbar).
-        prompt_fn : returns the prompt string to display (recomputed each line so
-                    mode/agent indicators stay current).
-        """
-        self.session = session
-        self._prompt_fn = prompt_fn
+    def __init__(
+        self,
+        *,
+        history: Optional[History] = None,
+        completer: Optional[Completer] = None,
+        style: Optional[Style] = None,
+        mode_line_fn: Callable[[], str] = lambda: "",
+        prompt_symbol: str = "❯ ",
+    ):
+        self._history = history
+        self._completer = completer
+        self._style = style
+        self._mode_line_fn = mode_line_fn
+        self._prompt_symbol = prompt_symbol
+
         self._q: "_queue.Queue[Optional[str]]" = _queue.Queue()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._patch_cm = None
-        # queued messages waiting to be processed (for toolbar display)
+
         self.pending: list[str] = []
-        # interrupt callback: called (in the asyncio loop) when Esc is pressed
-        # while a turn is running. Set by main_loop around each agent turn.
         self._interrupt_cb: Optional[Callable[[], None]] = None
         self._busy = False
-        # When paused, the input thread stops calling session.prompt() so a
-        # blocking msvcrt picker (quiz/permission/session browser) can own the
-        # keyboard without contention.
+
         self._paused = threading.Event()
         self._resumed = threading.Event()
         self._resumed.set()
+
+        self._app: Optional[Application] = None
+        # NOTE: do NOT build the Application here — constructing it touches the
+        # terminal output (Win32 console buffer) and raises in non-console
+        # contexts. Build lazily in start(), which runs inside the real REPL.
+
+    # ── application construction ──────────────────────────────────────────────
+
+    def _build_app(self):
+        kb = KeyBindings()
+
+        @kb.add("enter")
+        def _submit(event):
+            # Submit unless the user is composing a continuation (handled by c-j).
+            buf = self.textarea.buffer
+            event.app.exit(result=buf.text)
+
+        @kb.add("c-j")
+        def _newline(event):
+            self.textarea.buffer.insert_text("\n")
+
+        @kb.add("c-c")
+        @kb.add("c-d")
+        def _eof(event):
+            event.app.exit(result=None, exception=EOFError)
+
+        @kb.add("escape", eager=True)
+        def _interrupt(event):
+            if self.textarea.buffer.text.strip():
+                return  # don't interrupt while composing
+            self.fire_interrupt()
+
+        self.textarea = TextArea(
+            height=None,
+            prompt=self._prompt_symbol,
+            multiline=True,
+            wrap_lines=True,
+            history=self._history,
+            completer=self._completer,
+            complete_while_typing=True,
+            focus_on_click=True,
+            scrollbar=False,
+        )
+
+        # mode line below the box, e.g. "  ⏵⏵ agent · opus 4.7 · 1 queued"
+        def _mode_text():
+            return [("class:modeline", "  " + self._mode_line_fn())]
+
+        body = HSplit([
+            Frame(self.textarea),
+            Window(FormattedTextControl(_mode_text), height=1, always_hide_cursor=True),
+        ])
+
+        base_style = {
+            "frame.border": "fg:#505050",
+            "modeline": "fg:#888888",
+        }
+        merged = Style.from_dict(base_style)
+        if self._style is not None:
+            merged = merge_styles_safe(self._style, merged)
+
+        self._app = Application(
+            layout=Layout(body, focused_element=self.textarea),
+            key_bindings=kb,
+            style=merged,
+            full_screen=False,
+            mouse_support=False,
+            erase_when_done=True,
+        )
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     def start(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
-        # Hold patch_stdout for the entire session so background prints insert
-        # above the input line. renderer.console must point at the patched
-        # stdout for the whole duration.
+        if self._app is None:
+            self._build_app()
         self._patch_cm = patch_stdout(raw=True)
         self._patch_cm.__enter__()
         import sys
@@ -75,8 +150,12 @@ class InputController:
 
     def stop(self):
         self._stop.set()
-        # unblock get_line waiters
         self._q.put(None)
+        try:
+            if self._app is not None and self._app.is_running:
+                self._app.exit(result=None, exception=EOFError)
+        except Exception:
+            pass
         if self._patch_cm is not None:
             try:
                 self._patch_cm.__exit__(None, None, None)
@@ -88,61 +167,64 @@ class InputController:
     # ── interrupt wiring ──────────────────────────────────────────────────────
 
     def set_interrupt(self, cb: Optional[Callable[[], None]]):
-        """Register the callback Esc should fire while a turn runs (or None)."""
         self._interrupt_cb = cb
         self._busy = cb is not None
+        self._invalidate()
 
     def fire_interrupt(self):
-        """Called from the key binding (input thread). Schedules the interrupt
-        callback onto the asyncio loop. No-op if idle."""
         cb = self._interrupt_cb
         if cb is None or self._loop is None:
             return
         self._loop.call_soon_threadsafe(cb)
 
+    def _invalidate(self):
+        try:
+            if self._app is not None and self._app.is_running:
+                self._app.invalidate()
+        except Exception:
+            pass
+
     # ── input thread ──────────────────────────────────────────────────────────
 
     def _run(self):
         while not self._stop.is_set():
-            # honor pause: don't touch the keyboard while a picker owns it
             if self._paused.is_set():
                 self._resumed.set()
                 while self._paused.is_set() and not self._stop.is_set():
                     threading.Event().wait(0.03)
                 self._resumed.clear()
                 continue
+            # reset the box for a fresh line
+            self.textarea.buffer.reset()
             try:
-                line = self.session.prompt(self._prompt_fn())
-            except (EOFError, KeyboardInterrupt):
-                # Ctrl-D / Ctrl-C in the input thread → signal exit
+                line = self._app.run()
+            except EOFError:
+                self._q.put(None)
+                return
+            except (KeyboardInterrupt,):
                 self._q.put(None)
                 return
             except Exception:
-                # never let the input thread die silently on a transient error
                 continue
             if self._stop.is_set():
                 return
-            # if we were paused mid-prompt (app.exit forced a return), discard
             if self._paused.is_set():
                 continue
+            if line is None:
+                self._q.put(None)
+                return
             self._q.put(line)
 
     # ── pause/resume for blocking pickers ─────────────────────────────────────
 
     def pause(self):
-        """Stop the input thread from reading the keyboard so a blocking msvcrt
-        picker can take over. Exits any in-progress prompt app, then waits until
-        the thread has actually parked."""
         self._paused.set()
-        # break the thread out of a blocking session.prompt()
         try:
-            app = self.session.app
-            if app is not None and app.is_running:
-                app.exit(result="")
+            if self._app is not None and self._app.is_running:
+                self._app.exit(result="")
         except Exception:
             pass
-        # wait (briefly) for the thread to acknowledge the pause
-        for _ in range(50):
+        for _ in range(80):
             if self._resumed.is_set() and not self._reading():
                 break
             threading.Event().wait(0.01)
@@ -152,17 +234,14 @@ class InputController:
 
     def _reading(self) -> bool:
         try:
-            app = self.session.app
-            return bool(app is not None and app.is_running)
+            return bool(self._app is not None and self._app.is_running)
         except Exception:
             return False
 
     # ── async consumption ─────────────────────────────────────────────────────
 
     async def get_line(self) -> Optional[str]:
-        """Await the next submitted line. Returns None on shutdown/EOF."""
         assert self._loop is not None
-        # poll the thread-safe queue without blocking the event loop
         while True:
             try:
                 return self._q.get_nowait()
@@ -170,9 +249,12 @@ class InputController:
                 await asyncio.sleep(0.02)
 
     async def read_one(self) -> Optional[str]:
-        """Read a single line using the SAME persistent input bar — used for
-        one-off prompts (quiz free-text, confirmations). The caller should print
-        the question above the bar first. Returns the next submitted line, or
-        None on shutdown. (There is only ever one input bar; we never open a
-        second concurrent session.prompt.)"""
         return await self.get_line()
+
+
+def merge_styles_safe(a: Style, b: Style) -> Style:
+    from prompt_toolkit.styles import merge_styles
+    try:
+        return merge_styles([a, b])
+    except Exception:
+        return b

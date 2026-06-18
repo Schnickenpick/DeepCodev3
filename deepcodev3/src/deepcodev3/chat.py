@@ -977,46 +977,35 @@ async def main_loop():
 
     kb = _make_bindings()
 
-    def _toolbar():
-        from .models import get_model, PROVIDERS, TIER_COLORS
+    def _mode_line():
+        # Claude-Code-style mode line shown beneath the input box.
+        from .models import get_model
         m = get_model(model_id)
-        provider = PROVIDERS.get(m["provider"], {})
-        parts = [f" {m['name']}"]
-        if agent_mode:      parts.append("agent")
+        parts = []
+        if agent_mode:
+            parts.append("⏵⏵ agent mode")
+        else:
+            parts.append("chat mode")
+        parts.append(m["name"])
         if mode != "chat":  parts.append(mode)
         if reasoning_level: parts.append(f"reasoning:{reasoning_level}")
-        bar = "  " + "  ·  ".join(parts) + " "
-        # show queued messages + running-turn hint
+        line = "  ·  ".join(parts)
         ctrl = _INPUT_CONTROLLER
         if ctrl is not None:
             if ctrl.pending:
-                bar += f"  ·  {len(ctrl.pending)} queued"
+                line += f"  ·  {len(ctrl.pending)} queued"
             if ctrl._busy:
-                bar += "  ·  running (Esc to interrupt)"
-        return bar
-
-    session = PromptSession(
-        history=FileHistory(str(history_path)),
-        style=PROMPT_STYLE,
-        completer=DeepCompleter(),
-        complete_while_typing=True,
-        reserve_space_for_menu=6,
-        key_bindings=kb,
-        multiline=True,
-        bottom_toolbar=_toolbar,
-    )
-
-    def _prompt_text():
-        indicators = []
-        if agent_mode:          indicators.append("agent")
-        if mode == "merge":     indicators.append("merge")
-        elif mode == "search":  indicators.append("search")
-        if reasoning_level:     indicators.append(f"reasoning:{reasoning_level}")
-        prefix = f"[{', '.join(indicators)}] " if indicators else ""
-        return f"\n  {prefix}❯ "
+                line += "  ·  running (Esc to interrupt)"
+        return line
 
     global _INPUT_CONTROLLER
-    controller = InputController(session, _prompt_text)
+    controller = InputController(
+        history=FileHistory(str(history_path)),
+        completer=DeepCompleter(),
+        style=PROMPT_STYLE,
+        mode_line_fn=_mode_line,
+        prompt_symbol="❯ ",
+    )
     _INPUT_CONTROLLER = controller
     controller.start(asyncio.get_event_loop())
 
