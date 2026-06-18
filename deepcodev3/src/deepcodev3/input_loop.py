@@ -27,8 +27,9 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer
 from prompt_toolkit.history import FileHistory, History
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import Layout, HSplit, Window
+from prompt_toolkit.layout import Layout, HSplit, Window, FloatContainer, Float
 from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea, Frame
@@ -118,21 +119,40 @@ class InputController:
             Window(FormattedTextControl(_mode_text), height=1, always_hide_cursor=True),
         ])
 
+        # FloatContainer lets the completion menu pop up over the input box.
+        root = FloatContainer(
+            content=body,
+            floats=[
+                Float(
+                    xcursor=True,
+                    ycursor=True,
+                    content=CompletionsMenu(max_height=12, scroll_offset=1),
+                ),
+            ],
+        )
+
         base_style = {
             "frame.border": "fg:#505050",
             "modeline": "fg:#888888",
+            "completion-menu.completion": "bg:#1c1c1c fg:#bbbbbb",
+            "completion-menu.completion.current": "bg:#b1b9f9 fg:#000000",
+            "completion-menu.meta.completion": "bg:#1c1c1c fg:#777777",
+            "completion-menu.meta.completion.current": "bg:#8a93cc fg:#000000",
         }
         merged = Style.from_dict(base_style)
         if self._style is not None:
             merged = merge_styles_safe(self._style, merged)
 
         self._app = Application(
-            layout=Layout(body, focused_element=self.textarea),
+            layout=Layout(root, focused_element=self.textarea),
             key_bindings=kb,
             style=merged,
             full_screen=False,
             mouse_support=False,
             erase_when_done=True,
+            # repaint periodically so the mode line (queued/running) stays fresh
+            # and terminal-resize artifacts get cleared on the next tick.
+            refresh_interval=0.5,
         )
 
     # ── lifecycle ────────────────────────────────────────────────────────────
