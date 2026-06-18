@@ -46,6 +46,7 @@ class InputController:
         mode_line_fn: Callable[[], str] = lambda: "",
         mode_cycle_cb: Optional[Callable[[], None]] = None,
         prompt_symbol: str = "❯ ",
+        accent: str = "#d77757",
     ):
         self._history = history
         self._completer = completer
@@ -53,6 +54,7 @@ class InputController:
         self._mode_line_fn = mode_line_fn
         self._mode_cycle_cb = mode_cycle_cb
         self._prompt_symbol = prompt_symbol
+        self._accent = accent  # #rrggbb — frame border + prompt symbol color
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
@@ -150,7 +152,7 @@ class InputController:
 
         self.textarea = TextArea(
             height=_input_height,
-            prompt=self._prompt_symbol,
+            prompt=[("class:prompt-symbol", self._prompt_symbol)],
             multiline=True,
             wrap_lines=True,
             history=self._history,
@@ -202,23 +204,10 @@ class InputController:
             ],
         )
 
-        base_style = {
-            "frame.border": "fg:#505050",
-            "modeline": "fg:#888888",
-            "queued": "fg:#666666 italic",
-            "completion-menu.completion": "bg:#1c1c1c fg:#bbbbbb",
-            "completion-menu.completion.current": "bg:#b1b9f9 fg:#000000",
-            "completion-menu.meta.completion": "bg:#1c1c1c fg:#777777",
-            "completion-menu.meta.completion.current": "bg:#8a93cc fg:#000000",
-        }
-        merged = Style.from_dict(base_style)
-        if self._style is not None:
-            merged = merge_styles_safe(self._style, merged)
-
         self._app = Application(
             layout=Layout(root, focused_element=self.textarea),
             key_bindings=kb,
-            style=merged,
+            style=self._make_style(),
             full_screen=False,
             mouse_support=False,
             erase_when_done=True,
@@ -226,6 +215,34 @@ class InputController:
             # and terminal-resize artifacts get cleared on the next tick.
             refresh_interval=0.5,
         )
+
+    def _make_style(self) -> Style:
+        """Build the Application style. Frame border + prompt symbol use the
+        live accent so /color recolors the input box."""
+        base_style = {
+            "frame.border": f"fg:{self._accent}",
+            "prompt-symbol": f"fg:{self._accent} bold",
+            "modeline": "fg:#888888",
+            "queued": "fg:#666666 italic",
+            "completion-menu.completion": "bg:#1c1c1c fg:#bbbbbb",
+            "completion-menu.completion.current": f"bg:{self._accent} fg:#000000",
+            "completion-menu.meta.completion": "bg:#1c1c1c fg:#777777",
+            "completion-menu.meta.completion.current": "bg:#8a93cc fg:#000000",
+        }
+        merged = Style.from_dict(base_style)
+        if self._style is not None:
+            merged = merge_styles_safe(self._style, merged)
+        return merged
+
+    def set_accent(self, accent_hex: str):
+        """Recolor the input box at runtime (/color). `accent_hex` is #rrggbb."""
+        self._accent = accent_hex
+        if self._app is not None:
+            self._app.style = self._make_style()
+            try:
+                self._app.invalidate()
+            except Exception:
+                pass
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 

@@ -80,6 +80,8 @@ def is_tui_active() -> bool:
     return _tui_active
 
 # Claude-code color palette (dark theme, from src/utils/theme.ts)
+# CLAUDE_ORANGE is the live accent — swappable at runtime via /color (set_accent).
+# It's read at call time everywhere, so reassigning it recolors the whole UI.
 CLAUDE_ORANGE = "rgb(215,119,87)"
 SUCCESS_GREEN = "rgb(78,186,101)"
 ERROR_RED     = "rgb(255,107,128)"
@@ -89,6 +91,67 @@ PERMISSION_BLUE = "rgb(177,185,249)"
 DIFF_ADD_BG   = "rgb(34,92,43)"
 DIFF_DEL_BG   = "rgb(122,41,54)"
 
+# Named accent presets for /color. Values are rich-style rgb(...) strings.
+ACCENT_PRESETS = {
+    "blue":   "rgb(120,170,255)",   # the light blue we had back in the day
+    "cyan":   "rgb(100,210,220)",
+    "orange": "rgb(215,119,87)",    # claude default
+    "green":  "rgb(78,186,101)",
+    "purple": "rgb(192,132,252)",
+    "pink":   "rgb(244,143,177)",
+    "yellow": "rgb(240,200,90)",
+    "red":    "rgb(255,107,128)",
+    "white":  "rgb(220,220,220)",
+}
+
+# the live accent, kept in sync with CLAUDE_ORANGE
+ACCENT = CLAUDE_ORANGE
+
+
+def resolve_color(spec: str) -> str | None:
+    """Map a user color spec to a rich-style color string, or None if invalid.
+    Accepts: a preset name (blue/cyan/...), #rrggbb hex, or rgb(r,g,b)."""
+    if not spec:
+        return None
+    s = spec.strip().lower()
+    if s in ACCENT_PRESETS:
+        return ACCENT_PRESETS[s]
+    if s.startswith("#") and len(s) == 7:
+        try:
+            r, g, b = int(s[1:3], 16), int(s[3:5], 16), int(s[5:7], 16)
+            return f"rgb({r},{g},{b})"
+        except ValueError:
+            return None
+    if s.startswith("rgb(") and s.endswith(")"):
+        try:
+            parts = [int(p) for p in s[4:-1].split(",")]
+            if len(parts) == 3 and all(0 <= p <= 255 for p in parts):
+                return f"rgb({parts[0]},{parts[1]},{parts[2]})"
+        except ValueError:
+            return None
+    return None
+
+
+def _rgb_to_hex(rgb: str) -> str:
+    """rgb(r,g,b) -> #rrggbb for prompt_toolkit styles (which want hex)."""
+    try:
+        parts = [int(p) for p in rgb[4:-1].split(",")]
+        return "#{:02x}{:02x}{:02x}".format(*parts)
+    except Exception:
+        return "#d77757"
+
+
+def accent_hex() -> str:
+    """Current accent as #rrggbb (for prompt_toolkit)."""
+    return _rgb_to_hex(ACCENT)
+
+
+def set_accent(rgb: str):
+    """Set the global UI accent color. `rgb` must be a rich rgb(...) string."""
+    global ACCENT, CLAUDE_ORANGE
+    ACCENT = rgb
+    CLAUDE_ORANGE = rgb
+
 BLACK_CIRCLE = "●"
 
 
@@ -97,10 +160,14 @@ def set_notify(enabled: bool):
     _notify = enabled
 
 
-CLAUDE_LOGO = [
-    "  ▐▛███▜▌  ",
-    " ▝▜█████▛▘ ",
-    "   ▘▘ ▝▝   ",
+DEEPCODE_LOGO = [
+    "╭───────────────╮",
+    "│ ● ● ●         │",
+    "├───────────────┤",
+    "│               │",
+    "│  ❯ ▁▁▁▁▁  █   │",
+    "│               │",
+    "╰───────────────╯",
 ]
 
 
@@ -124,7 +191,7 @@ def print_banner(model_id: str | None = None, username: str | None = None):
         "",
         f"Welcome back, [bold]{name}[/bold]!",
         "",
-        *[f"[{CLAUDE_ORANGE}]{l}[/{CLAUDE_ORANGE}]" for l in CLAUDE_LOGO],
+        *[f"[{CLAUDE_ORANGE}]{l}[/{CLAUDE_ORANGE}]" for l in DEEPCODE_LOGO],
         "",
     ]
     if model_line:

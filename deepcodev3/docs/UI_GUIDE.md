@@ -37,6 +37,24 @@ min=1)`. NO slack/`max=N` reservation — that made the box render tall/fill the
 screen. It must equal the content line count so the box is 1 line by default
 and grows downward per newline (capped 10).
 
+## Accent color / `/color` (runtime restyle)
+
+The UI accent is one value, swappable live:
+- rich side: `renderer.CLAUDE_ORANGE` (live, read at call time everywhere) —
+  `renderer.set_accent(rgb)` reassigns it. `resolve_color()` accepts a preset
+  name / `#hex` / `rgb(r,g,b)`; `ACCENT_PRESETS` holds the named ones.
+- prompt_toolkit side wants `#rrggbb`: `renderer.accent_hex()`. The input box is
+  recolored by `InputController.set_accent(hex)` → rebuilds the Application style
+  in `_make_style()` and `app.invalidate()`s. The box's accent touches three
+  style keys: `frame.border`, `prompt-symbol` (the `❯`, passed as
+  `[("class:prompt-symbol", "❯ ")]` formatted text so it's styleable), and
+  `completion-menu.completion.current`.
+- `merge_styles([a, b])` — LATER style wins. The box passes `merge_styles_safe(
+  PROMPT_STYLE, base_style)`, so `base_style` (accent) overrides PROMPT_STYLE's
+  old `prompt: bold cyan`. If you add a style key, know the precedence.
+- `/color` persists `cfg["accent"]`, applied at startup BEFORE the banner so the
+  logo (`renderer.DEEPCODE_LOGO`, the terminal-shell `❯_` mark) renders in it.
+
 ## Console-file routing — the #1 source of "output vanished" bugs
 
 See ARCHITECTURE.md "Console-file routing". The short version:
