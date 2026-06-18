@@ -109,6 +109,16 @@ class InputController:
                 return  # don't interrupt while composing
             self.fire_interrupt()
 
+        @kb.add("backspace")
+        def _backspace(event):
+            # On an empty box, swallow backspace so the terminal bell doesn't
+            # ring (prompt_toolkit's default delete-before-cursor beeps when
+            # there's nothing to delete). Otherwise delete normally.
+            buf = self.textarea.buffer
+            if buf.cursor_position == 0:
+                return
+            buf.delete_before_cursor(count=event.arg)
+
         @kb.add("s-tab")  # shift+tab: cycle permission mode
         def _cycle_mode(event):
             if self._mode_cycle_cb is not None:

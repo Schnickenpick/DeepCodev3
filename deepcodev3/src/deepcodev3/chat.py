@@ -347,10 +347,95 @@ COMMANDS = [
 ]
 
 
+_AT_TOKEN_RE = re.compile(r'@([^\s@]*)$')
+
+
+def _file_suggestions(partial: str, limit: int = 30):
+    """Paths under cwd matching `partial` for @-mention completion. Dirs first,
+    junk dirs skipped, recurses but bounded. Returns (relpath, is_dir) tuples."""
+    import os
+    SKIP = {".git", "__pycache__", "node_modules", ".venv", "venv", ".idea",
+            ".vscode", "dist", "build", ".mypy_cache", ".pytest_cache",
+            ".deepcodev3", ".egg-info"}
+    partial = partial.replace("\\", "/")
+    # the directory to list = everything up to the last '/', the rest is a filter
+    if "/" in partial:
+        base, frag = partial.rsplit("/", 1)
+    else:
+        base, frag = "", partial
+    frag_l = frag.lower()
+    try:
+        entries = sorted(os.scandir(base or "."),
+                         key=lambda e: (not e.is_dir(), e.name.lower()))
+    except OSError:
+        return
+    n = 0
+    for e in entries:
+        if e.name in SKIP or any(e.name.endswith(s) for s in (".egg-info",)):
+            continue
+        if frag_l and not e.name.lower().startswith(frag_l):
+            continue
+        rel = f"{base}/{e.name}" if base else e.name
+        yield (rel, e.is_dir())
+        n += 1
+        if n >= limit:
+            return
+
+
+_AT_MENTION_RE = re.compile(r'(?<!\S)@([^\s@]+)')
+_MAX_MENTION_CHARS = 12000
+
+
+def expand_at_mentions(text: str) -> tuple[str, list[str]]:
+    """Replace @path tokens with the file's content appended as context.
+    Returns (model_text, attached_paths). Only paths that resolve to a real
+    file under cwd are expanded; missing/dir/oversize ones are left as-is.
+    The visible `@path` token stays inline; content is appended below."""
+    from pathlib import Path
+    attached: list[str] = []
+    blocks: list[str] = []
+    seen: set[str] = set()
+    for m in _AT_MENTION_RE.finditer(text):
+        rel = m.group(1).rstrip(".,;:)")  # trailing punctuation isn't part of the path
+        if rel in seen:
+            continue
+        p = Path(rel)
+        try:
+            if not p.is_file():
+                continue
+            data = p.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+        seen.add(rel)
+        if len(data) > _MAX_MENTION_CHARS:
+            data = data[:_MAX_MENTION_CHARS] + "\n... [truncated]"
+        blocks.append(f"[Attached file: {rel}]\n{data}")
+        attached.append(rel)
+    if not blocks:
+        return text, []
+    return text + "\n\n" + "\n\n".join(blocks), attached
+
+
 class DeepCompleter(Completer):
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
         stripped = text.lstrip()
+
+        # @file mentions — anywhere in the line, not just at the start.
+        at = _AT_TOKEN_RE.search(text)
+        if at is not None:
+            partial = at.group(1)
+            for rel, is_dir in _file_suggestions(partial):
+                # complete the fragment after the last '/' (or the whole token)
+                frag = partial.rsplit("/", 1)[-1]
+                insert = rel.rsplit("/", 1)[-1] + ("/" if is_dir else "")
+                yield Completion(
+                    insert,
+                    start_position=-len(frag),
+                    display=HTML(f"<b>{rel}{'/' if is_dir else ''}</b>"),
+                    display_meta="dir" if is_dir else "file",
+                )
+            return
 
         if not stripped.startswith("/"):
             return
@@ -1402,8 +1487,19 @@ async def main_loop():
 
             continue
 
+        # Intent detection (plan / ultracode) must run on the USER's words, not
+        # on any @-mentioned file content — capture before expansion.
+        _intent = text.lower()
+
+        # @file mentions — inline the referenced files' content as context.
+        # The raw @path was already echoed; expand only the model-bound text.
+        if "@" in text:
+            text, _attached = expand_at_mentions(text)
+            if _attached:
+                renderer.print_info("Attached: " + ", ".join(_attached))
+
         # Detect planning intent in natural language
-        _tl = text.lower()
+        _tl = _intent
         _PLAN_TRIGGERS = ("make a plan", "plan out", "plan this", "create a plan", "write a plan", "give me a plan", "let's plan", "lets plan")
         if any(t in _tl for t in _PLAN_TRIGGERS):
             agent_conversation = await _run_plan(
