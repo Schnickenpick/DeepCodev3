@@ -1259,7 +1259,7 @@ async def main_loop():
                     renderer.print_error("Usage: /plan <task description>")
                 else:
                     agent_conversation = await _run_plan(
-                        arg.strip(), model_id, memory_md, user_md, deepcode_md, soul_md, session, agent_conversation, project_memory_md
+                        arg.strip(), model_id, memory_md, user_md, deepcode_md, soul_md, None, agent_conversation, project_memory_md
                     )
 
             elif cmd == "/ultracode":
@@ -1285,7 +1285,7 @@ async def main_loop():
         _PLAN_TRIGGERS = ("make a plan", "plan out", "plan this", "create a plan", "write a plan", "give me a plan", "let's plan", "lets plan")
         if any(t in _tl for t in _PLAN_TRIGGERS):
             agent_conversation = await _run_plan(
-                text, model_id, memory_md, user_md, deepcode_md, soul_md, session, agent_conversation, project_memory_md
+                text, model_id, memory_md, user_md, deepcode_md, soul_md, None, agent_conversation, project_memory_md
             )
             continue
 
@@ -1308,7 +1308,7 @@ async def main_loop():
         # Returns (effective_message, prefetched_response_or_None).
         # If prefetched is not None, AI skipped quizzing and already answered — show it directly.
         effective_text, prefetched = await _run_quiz_phase(
-            session, text, model_id, mode, memory_md, user_md, deepcode_md, sys_prompt, quiz_max_options,
+            None, text, model_id, mode, memory_md, user_md, deepcode_md, sys_prompt, quiz_max_options,
             project_memory_md=project_memory_md,
         )
 
@@ -1337,7 +1337,7 @@ async def main_loop():
                 question = agent_quiz.get("question", "")
                 if question:
                     renderer.console.print(f"\n  [bold cyan]{question}[/bold cyan]")
-                result = _pick_option(agent_quiz["options"], session)
+                result = _pick_option(agent_quiz["options"], None)
                 if result is None:
                     break
                 if result == "__free__":
