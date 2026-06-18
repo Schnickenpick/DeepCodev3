@@ -26,34 +26,6 @@ QUIZ_RE = re.compile(r'<quiz>([\s\S]*?)</quiz>')
 DEFAULT_QUIZ_MAX = 5
 
 
-def _prompt_with_patched_stdout(session: PromptSession, prompt_text: str) -> str:
-    """Run session.prompt() with stdout patched so that background tasks
-    (e.g. an UltraCode swarm running via asyncio.create_task) printing via
-    renderer.console while this prompt is active get inserted above the
-    input line instead of corrupting it."""
-    from prompt_toolkit.patch_stdout import patch_stdout
-    # raw=True: pass ANSI escape codes through untouched (rich.Console writes
-    # raw ANSI for colors/styles — without raw=True, prompt_toolkit's Output.write()
-    # mangles ESC bytes into literal "?" characters).
-    #
-    # IMPORTANT: while patch_stdout is active, sys.stdout is a StdoutProxy. We
-    # point renderer.console at it so prints during the prompt insert above the
-    # input line. On exit we MUST restore the *real* console file — NOT whatever
-    # console.file happened to be on entry, because that could itself be a stale
-    # StdoutProxy from a re-entrant call. Restoring a dead proxy sends every
-    # subsequent print into a void (this was the "agent replies but nothing shows"
-    # bug). If a full-screen TUI owns the screen, leave its buffer file in place.
-    with patch_stdout(raw=True):
-        renderer.console.file = sys.stdout
-        try:
-            return session.prompt(prompt_text, style=PROMPT_STYLE)
-        finally:
-            if renderer.is_tui_active():
-                renderer.console.file = renderer._buffer_file
-            else:
-                renderer.console.file = renderer._real_console_file
-
-
 async def _run_cancelable(coro):
     """Run `coro` as a task that the user can interrupt by pressing Esc (on an
     empty input line) while it runs. The persistent input controller owns the
@@ -418,35 +390,6 @@ PROMPT_STYLE = Style.from_dict({
 # Set to the active InputController so the Esc key binding can fire an interrupt
 # of the in-flight agent turn from the input thread.
 _INPUT_CONTROLLER = None
-
-
-def _make_bindings() -> KeyBindings:
-    kb = KeyBindings()
-
-    @kb.add("enter")
-    def _submit(event):
-        event.current_buffer.validate_and_handle()
-
-    @kb.add("c-j")
-    def _newline_cj(event):
-        event.current_buffer.insert_text("\n")
-
-    @kb.add("escape", "enter")
-    def _newline_alt(event):
-        event.current_buffer.insert_text("\n")
-
-    # Esc on an EMPTY input while a turn is running → interrupt that turn.
-    # If there's text in the buffer, Esc is left to prompt_toolkit (so it can
-    # still be used as a meta-prefix / does nothing destructive to your typing).
-    @kb.add("escape", eager=True)
-    def _interrupt(event):
-        buf = event.current_buffer
-        if buf.text.strip():
-            return  # don't interrupt while the user is mid-typing a message
-        if _INPUT_CONTROLLER is not None:
-            _INPUT_CONTROLLER.fire_interrupt()
-
-    return kb
 
 
 async def _gen_title(first_message: str, model_id: str) -> str:
@@ -974,8 +917,6 @@ async def main_loop():
 
     storage.ensure_dir()
     history_path = storage.DATA_DIR / "prompt_history"
-
-    kb = _make_bindings()
 
     def _mode_line():
         # Claude-Code-style mode line shown beneath the input box.
