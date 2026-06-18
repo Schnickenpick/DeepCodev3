@@ -924,12 +924,12 @@ async def main_loop():
         # Claude-Code-style mode line shown beneath the input box.
         from .models import get_model
         m = get_model(model_id)
-        parts = []
+        # Lead with the permission mode (the shift+tab line) when tools are on.
         if agent_mode:
-            parts.append("⏵⏵ agent mode")
+            lead = permissions.mode_label()
         else:
-            parts.append("chat mode")
-        parts.append(m["name"])
+            lead = "chat mode"
+        parts = [lead, m["name"]]
         if mode != "chat":  parts.append(mode)
         if reasoning_level: parts.append(f"reasoning:{reasoning_level}")
         line = "  ·  ".join(parts)
@@ -941,6 +941,13 @@ async def main_loop():
                 # live token count + elapsed + interrupt hint
                 line += ctrl.status_suffix() or "  ·  running (Esc to interrupt)"
         return line
+
+    permissions.set_mode(cfg.get("perm_mode", permissions.MODE_DEFAULT))
+
+    def _cycle_perm_mode():
+        new_mode = permissions.cycle_mode()
+        cfg["perm_mode"] = new_mode
+        storage.save_config(cfg)
 
     def _turn_event(ev: dict):
         # accumulate live token count for the status line
@@ -955,6 +962,7 @@ async def main_loop():
         completer=DeepCompleter(),
         style=PROMPT_STYLE,
         mode_line_fn=_mode_line,
+        mode_cycle_cb=_cycle_perm_mode,
         prompt_symbol="❯ ",
     )
     _INPUT_CONTROLLER = controller
