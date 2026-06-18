@@ -335,6 +335,10 @@ async def run_agent(user_message: str, conversation: list[dict], memory_md: str,
                     delta = chunk.get("delta", "")
                     if delta:
                         full_response += delta
+                        # live token streaming for non-console frontends (GUI
+                        # bridge). Harmless for the TUI, which ignores on_event.
+                        if on_event:
+                            on_event({"type": "delta", "text": delta})
             finally:
                 _show_thinking_dot = False
                 dot_task.cancel()
