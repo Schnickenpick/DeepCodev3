@@ -44,12 +44,14 @@ class InputController:
         completer: Optional[Completer] = None,
         style: Optional[Style] = None,
         mode_line_fn: Callable[[], str] = lambda: "",
+        mode_cycle_cb: Optional[Callable[[], None]] = None,
         prompt_symbol: str = "❯ ",
     ):
         self._history = history
         self._completer = completer
         self._style = style
         self._mode_line_fn = mode_line_fn
+        self._mode_cycle_cb = mode_cycle_cb
         self._prompt_symbol = prompt_symbol
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -104,6 +106,12 @@ class InputController:
             if self.textarea.buffer.text.strip():
                 return  # don't interrupt while composing
             self.fire_interrupt()
+
+        @kb.add("s-tab")  # shift+tab: cycle permission mode
+        def _cycle_mode(event):
+            if self._mode_cycle_cb is not None:
+                self._mode_cycle_cb()
+            event.app.invalidate()
 
         @kb.add("up")
         def _up(event):
