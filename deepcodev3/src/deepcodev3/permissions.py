@@ -13,11 +13,15 @@ OPTION_DENY        = "deny"
 OPTION_DENY_ALWAYS = "deny_always"
 
 # ── permission modes (toggled with shift+tab) ─────────────────────────────────
-# default : prompt before every non-read tool call (the safe baseline)
-# auto    : auto-allow ALL tool calls (hard-deny patterns still apply)
+# default  : prompt before every non-read tool call (the safe baseline)
+# auto     : auto-allow ALL tool calls (hard-deny patterns still apply)
+# readonly : allow read-category tools, silently DENY all write/exec/network.
+#            Used by the GUI when "Agent" is off — no interactive picker needed
+#            (the GUI can't show one yet), and no shell access to strangers.
 MODE_DEFAULT = "default"
 MODE_AUTO = "auto"
-_MODE_CYCLE = [MODE_DEFAULT, MODE_AUTO]
+MODE_READONLY = "readonly"
+_MODE_CYCLE = [MODE_DEFAULT, MODE_AUTO]  # only these two cycle via shift+tab
 
 _mode = MODE_DEFAULT
 
@@ -28,7 +32,7 @@ def get_mode() -> str:
 
 def set_mode(mode: str):
     global _mode
-    if mode in _MODE_CYCLE:
+    if mode in (MODE_DEFAULT, MODE_AUTO, MODE_READONLY):
         _mode = mode
 
 
@@ -338,6 +342,10 @@ def ask_permission(tool_name: str, args: dict) -> str:
     category = category_for_tool(tool_name)
     if category == "read":
         return OPTION_ALLOW
+
+    # read-only mode: deny all write/exec/network (GUI with Agent off).
+    if _mode == MODE_READONLY:
+        return OPTION_DENY
 
     # permission mode short-circuits the interactive picker
     if _mode == MODE_AUTO:

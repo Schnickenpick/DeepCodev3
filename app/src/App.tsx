@@ -38,8 +38,9 @@ export default function App() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
-  // toggles
-  const [agent, setAgent] = useState(true);
+  // toggles — Agent defaults OFF: tools (shell/file-write) require an explicit
+  // opt-in. Read-only until the user turns Agent on.
+  const [agent, setAgent] = useState(false);
   const [reasoning, setReasoning] = useState("off");
 
   const wsRef = useRef<WebSocket | null>(null);

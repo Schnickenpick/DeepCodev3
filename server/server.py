@@ -62,7 +62,8 @@ async def get_config():
     return {
         "model": cfg.get("model", models.DEFAULT_MODEL),
         "accent": cfg.get("accent", "orange"),
-        "agent": cfg.get("agent", True),
+        # GUI Agent defaults OFF — tools require explicit opt-in (see run_turn).
+        "agent": False,
         "reasoning": cfg.get("reasoning", None),
     }
 
@@ -152,8 +153,15 @@ class _Session:
         if model_id:
             self.model_id = model_id
         reasoning_level = opts.get("reasoning")  # None/"off"/low/middle/high/ultra
-        # auto-allow tool calls in the GUI for now (interactive dialogs later)
-        permissions.set_mode(permissions.MODE_AUTO)
+        # Permission posture (the GUI has no interactive picker yet):
+        #  Agent ON  -> auto-allow tools (the user explicitly opted into shell/
+        #               file access via the Agent chip).
+        #  Agent OFF -> read-only: file reads/greps allowed, but write/exec/
+        #               network are denied. Protects users who didn't ask for an
+        #               agent from a model that decides to run commands.
+        # Hard-deny patterns (rm -rf / etc.) apply in BOTH modes.
+        agent_on = bool(opts.get("agent", False))
+        permissions.set_mode(permissions.MODE_AUTO if agent_on else permissions.MODE_READONLY)
 
         self.store.setdefault("messages", []).append(
             {"role": "user", "content": text, "model": self.model_id})
