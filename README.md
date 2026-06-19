@@ -1,10 +1,18 @@
 # DeepCode v3
 
+## DISCLAIMER:
+I am **NOT** responsible for what you do with this tool or what this tool does with you! Use at your own risk!
+---
+
+
 A claude-code-style terminal coding agent in Python. Streams responses, runs
 file/shell tools with a permission layer, multi-stage reasoning, and an
 UltraCode agent swarm — plus a desktop GUI.
 
 ## Install
+
+Go to https://github.com/Schnickenpick/DeepCodev3/releases and get the latest release or do all this:
+
 
 From this directory (`deepcodev3/`):
 
