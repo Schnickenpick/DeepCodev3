@@ -50,6 +50,7 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: "#0c0c0f",
     title: "DeepCode",
+    icon: path.join(__dirname, "..", "assets", "icon.ico"),
     show: false, // reveal on ready-to-show to avoid the white-flash / blank wait
     autoHideMenuBar: true,
     webPreferences: {
