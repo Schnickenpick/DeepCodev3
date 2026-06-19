@@ -267,6 +267,10 @@ export default function App() {
                 <Logo className="h-16 w-16" />
                 <div className="mt-4 text-lg font-medium text-gray-300">How can I help?</div>
                 <div className="mt-1 text-sm">Ask anything, or @mention a file to attach it.</div>
+                <div className="mt-6 max-w-md text-center text-xs text-gray-600">
+                  Read-only until you enable <span className="text-gray-400">Agent</span>. With Agent on,
+                  DeepCode can run commands and edit files — use at your own risk; you're responsible for what it does.
+                </div>
               </div>
             )}
             {messages.map((m, i) => <MessageView key={i} msg={m} />)}

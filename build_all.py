@@ -72,11 +72,11 @@ def main():
     else:
         print(f"!!! GUI exe not found at {gui_src} — check electron-builder output")
 
-    # ship the installer scripts next to the exes
-    for bat in ("install.bat", "uninstall.bat"):
-        src = os.path.join(ROOT, "installer", bat)
+    # ship the installer scripts + README/disclaimer next to the exes
+    for f in ("install.bat", "uninstall.bat", "RELEASE.md"):
+        src = os.path.join(ROOT, "installer", f)
         if os.path.isfile(src):
-            shutil.copy2(src, os.path.join(DIST, bat))
+            shutil.copy2(src, os.path.join(DIST, f))
 
     print("\n=== done — final builds in dist/ ===")
     for f in sorted(os.listdir(DIST)):
