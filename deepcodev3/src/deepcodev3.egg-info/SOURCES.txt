@@ -1,3 +1,4 @@
+README.md
 pyproject.toml
 src/deepcodev3/__init__.py
 src/deepcodev3/__main__.py
@@ -5,6 +6,7 @@ src/deepcodev3/agent.py
 src/deepcodev3/api.py
 src/deepcodev3/chat.py
 src/deepcodev3/cli.py
+src/deepcodev3/input_loop.py
 src/deepcodev3/models.py
 src/deepcodev3/permissions.py
 src/deepcodev3/reasoning.py
@@ -14,6 +16,7 @@ src/deepcodev3/system_prompt.py
 src/deepcodev3/tool_schema.py
 src/deepcodev3/tools.py
 src/deepcodev3/ultracode.py
+src/deepcodev3/workflows_ui.py
 src/deepcodev3.egg-info/PKG-INFO
 src/deepcodev3.egg-info/SOURCES.txt
 src/deepcodev3.egg-info/dependency_links.txt

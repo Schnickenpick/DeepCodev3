@@ -24,3 +24,5 @@ app/dist/
 # vendored reference clone of Claude Code (not part of this project)
 claude-code-main/
 claude-code-main.zip
+
+.claude
