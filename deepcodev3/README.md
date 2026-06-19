@@ -49,6 +49,23 @@ cd app && npm install && npm run dev
 
 The GUI shares conversation history with the terminal.
 
+## Building standalone exes
+
+From the repo root (one level up from this `deepcodev3/`):
+
+```sh
+python build_all.py
+```
+
+Produces two self-contained executables in `dist/` (no Python or Node needed to
+run them):
+
+- `dist/DeepCodeCLI.exe` — the terminal app
+- `dist/DeepCodeGUI.exe` — the desktop GUI (a single portable exe; bundles the
+  Python backend)
+
+Requires PyInstaller and the GUI deps installed (`cd app && npm install`).
+
 ## Notes
 
 - Configured against a hosted model gateway (`src/deepcodev3/api.py`).

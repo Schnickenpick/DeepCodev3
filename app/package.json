@@ -44,7 +44,7 @@
     ],
     "extraResources": [
       {
-        "from": "../dist/bridge.exe",
+        "from": "../build/_pydist/bridge.exe",
         "to": "bridge/bridge.exe"
       }
     ],
