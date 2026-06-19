@@ -25,9 +25,9 @@ APP = os.path.join(ROOT, "app")
 RELEASE = os.path.join(ROOT, "release")
 
 
-def run(cmd, cwd=None, shell=False):
+def run(cmd, cwd=None, shell=False, env=None):
     print(f"\n>>> {' '.join(cmd) if isinstance(cmd, list) else cmd}")
-    r = subprocess.run(cmd, cwd=cwd, shell=shell)
+    r = subprocess.run(cmd, cwd=cwd, shell=shell, env=env)
     if r.returncode != 0:
         print(f"!!! step failed (exit {r.returncode})")
         sys.exit(r.returncode)
@@ -49,8 +49,14 @@ def main():
         cwd=ROOT)
 
     # 2. build the GUI portable exe (bundles dist/bridge.exe)
+    # Disable code signing: we ship an UNSIGNED portable exe. Without this,
+    # electron-builder downloads winCodeSign and tries to extract macOS .dylib
+    # SYMLINKS, which fail on Windows without admin/Developer Mode ("client
+    # lacks required privilege") and abort the build.
     npm = "npm.cmd" if os.name == "nt" else "npm"
-    run([npm, "run", "dist"], cwd=APP, shell=(os.name == "nt"))
+    env = dict(os.environ)
+    env["CSC_IDENTITY_AUTO_DISCOVERY"] = "false"
+    run([npm, "run", "dist"], cwd=APP, shell=(os.name == "nt"), env=env)
 
     # 3. collect into release/
     os.makedirs(RELEASE, exist_ok=True)

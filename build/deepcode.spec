@@ -30,7 +30,13 @@ common = dict(
     hiddenimports=tk_hidden + tke_hidden,
     hookspath=[],
     runtime_hooks=[],
-    excludes=[],
+    # DeepCode needs none of these; they get dragged in via global site-packages
+    # / tiktoken's transitive deps and bloat the exe ~3x. Exclude them.
+    excludes=[
+        "matplotlib", "pygame", "PyQt6", "PyQt5", "PySide6", "IPython",
+        "jedi", "parso", "notebook", "numpy", "scipy", "pandas", "lxml",
+        "zmq", "tkinter", "PIL", "sqlite3", "test",
+    ],
     noarchive=False,
 )
 
