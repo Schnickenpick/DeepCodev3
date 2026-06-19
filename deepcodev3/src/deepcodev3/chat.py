@@ -1086,7 +1086,9 @@ async def run_chat_stream(message: str, model_id: str, mode: str, memory_md: str
     return full_content, reasoning
 
 
-async def main_loop():
+async def main_loop(resume=None):
+    """resume: None = fresh session; "last" = continue most recent; a session id
+    string = resume that specific conversation; "pick" = browse and choose."""
     cfg = storage.load_config()
     model_id = cfg.get("model", DEFAULT_MODEL)
     mode = cfg.get("mode", "chat")
@@ -1164,8 +1166,35 @@ async def main_loop():
         renderer.print_info("DEEPCODE.md loaded.")
     if soul_md:
         renderer.print_info("SOUL.md loaded.")
-    current_session = storage.new_session(model_id)
+    # Resume a prior conversation (-c / --resume <id>) or start fresh.
+    current_session = None
     agent_conversation: list[dict] = []
+    if resume is not None:
+        target = None
+        if resume == "last":
+            target = sessions[-1] if sessions else None
+        elif resume == "pick":
+            target = _session_browser(sessions)
+        else:
+            target = next((s for s in sessions if s.get("id") == resume), None)
+            if target is None:
+                # allow a short id prefix
+                target = next((s for s in sessions if s.get("id", "").startswith(resume)), None)
+        if target is not None:
+            current_session = target
+            agent_conversation = [
+                {"role": m["role"], "content": m["content"]}
+                for m in target.get("messages", [])
+                if m["role"] in ("user", "assistant")
+            ]
+            model_id = target.get("model", model_id)
+            renderer.print_info(f"Resumed: {target.get('title', target.get('id', 'session'))}")
+        else:
+            renderer.print_error(
+                f"No session to resume ({resume!r}). Starting fresh." if resume != "last"
+                else "No previous conversation. Starting fresh.")
+    if current_session is None:
+        current_session = storage.new_session(model_id)
     stream_task = None
 
     auto_context = cfg.get("auto_context", True)
@@ -1614,7 +1643,7 @@ async def main_loop():
                 "content": content,
                 "model": model_id if mode == "chat" else f"__{mode}__",
             })
-            storage.save_history((sessions + [current_session])[-100:])
+            _persist_session(sessions, current_session)
 
             # Auto-extract facts — split into global/project/user buckets
             if len(current_session["messages"]) >= 2:
@@ -1650,6 +1679,11 @@ async def main_loop():
     finally:
         controller.stop()
         _INPUT_CONTROLLER = None
+        # Print how to resume THIS conversation next time.
+        if current_session.get("messages"):
+            sid = current_session.get("id", "")
+            renderer.print_info(
+                f"Resume this chat:  deepcode --resume {sid}   (or  deepcode -c  for the latest)")
 
 
 async def _set_title(session_obj: dict, first_msg: str, model_id: str):
@@ -1658,5 +1692,26 @@ async def _set_title(session_obj: dict, first_msg: str, model_id: str):
     session_obj["title"] = title
 
 
+def _persist_session(sessions: list[dict], current: dict):
+    """Save history with `current` merged in by id (no duplicate when resuming
+    an existing session)."""
+    merged = [s for s in sessions if s.get("id") != current.get("id")]
+    merged.append(current)
+    storage.save_history(merged[-100:])
+
+
+def _parse_cli_args(argv: list[str]):
+    """-c/--continue -> resume latest; --resume [id] -> resume id (or pick if
+    no id). Returns the `resume` value for main_loop, or None."""
+    args = argv[1:]
+    for i, a in enumerate(args):
+        if a in ("-c", "--continue"):
+            return "last"
+        if a in ("-r", "--resume"):
+            nxt = args[i + 1] if i + 1 < len(args) else None
+            return nxt if nxt and not nxt.startswith("-") else "pick"
+    return None
+
+
 def run():
-    asyncio.run(main_loop())
+    asyncio.run(main_loop(resume=_parse_cli_args(sys.argv)))
