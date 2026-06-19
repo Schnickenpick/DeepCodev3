@@ -49,13 +49,11 @@
       }
     ],
     "win": {
-      "target": "nsis",
+      "target": "portable",
       "icon": "assets/icon.ico"
     },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "perMachine": false
+    "portable": {
+      "artifactName": "DeepCodeGUI.exe"
     }
   }
 }

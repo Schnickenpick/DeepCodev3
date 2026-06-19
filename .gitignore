@@ -17,5 +17,6 @@ deepcodev3/.deepcodev3/
 # build artifacts (PyInstaller exes + electron-builder output)
 /dist/
 /build/_work/
+/release/
 app/release/
 app/dist/
