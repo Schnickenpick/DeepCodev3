@@ -1,6 +1,15 @@
 __pycache__/
 *.pyc
+*.egg-info/
 _deepcode_debug.log
-test4/
-testing_run/
 *.log
+
+# scratch / test output dirs
+test3/
+test4/
+testing2/
+testing_run/
+
+# DeepCode runtime state (config, history, memory) — never commit personal usage
+.deepcodev3/
+deepcodev3/.deepcodev3/
