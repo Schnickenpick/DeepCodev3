@@ -14,9 +14,13 @@ testing_run/
 .deepcodev3/
 deepcodev3/.deepcodev3/
 
-# build artifacts (PyInstaller exes + electron-builder output)
+# build artifacts — final exes (dist/) + all intermediates
 /dist/
 /build/_work/
-/release/
+/build/_pydist/
 app/release/
 app/dist/
+
+# vendored reference clone of Claude Code (not part of this project)
+claude-code-main/
+claude-code-main.zip

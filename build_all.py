@@ -20,9 +20,10 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-DIST = os.path.join(ROOT, "dist")
 APP = os.path.join(ROOT, "app")
-RELEASE = os.path.join(ROOT, "release")
+DIST = os.path.join(ROOT, "dist")          # FINAL output (the only folder users see)
+PYDIST = os.path.join(ROOT, "build", "_pydist")  # PyInstaller raw exes (intermediate)
+GUI_OUT = os.path.join(APP, "release")     # electron-builder raw output (intermediate)
 
 
 def run(cmd, cwd=None, shell=False, env=None):
@@ -43,12 +44,13 @@ def main():
     kill("bridge.exe")
     kill("DeepCodeGUI.exe")
 
-    # 1. freeze python exes
+    # 1. freeze python exes (deepcode.exe + bridge.exe) into the intermediate
+    #    build/_pydist; the GUI bundles bridge.exe from there.
     run([sys.executable, "-m", "PyInstaller", "build/deepcode.spec",
-         "--noconfirm", "--distpath", "dist", "--workpath", "build/_work"],
+         "--noconfirm", "--distpath", PYDIST, "--workpath", "build/_work"],
         cwd=ROOT)
 
-    # 2. build the GUI portable exe (bundles dist/bridge.exe)
+    # 2. build the GUI portable exe (bundles build/_pydist/bridge.exe).
     # Disable code signing: we ship an UNSIGNED portable exe. Without this,
     # electron-builder downloads winCodeSign and tries to extract macOS .dylib
     # SYMLINKS, which fail on Windows without admin/Developer Mode ("client
@@ -58,20 +60,22 @@ def main():
     env["CSC_IDENTITY_AUTO_DISCOVERY"] = "false"
     run([npm, "run", "dist"], cwd=APP, shell=(os.name == "nt"), env=env)
 
-    # 3. collect into release/
-    os.makedirs(RELEASE, exist_ok=True)
-    shutil.copy2(os.path.join(DIST, "deepcode.exe"),
-                 os.path.join(RELEASE, "DeepCodeCLI.exe"))
-    gui_src = os.path.join(APP, "release", "DeepCodeGUI.exe")
+    # 3. collect the two FINAL exes into dist/ — the only folder users touch.
+    if os.path.isdir(DIST):
+        shutil.rmtree(DIST, ignore_errors=True)
+    os.makedirs(DIST, exist_ok=True)
+    shutil.copy2(os.path.join(PYDIST, "deepcode.exe"),
+                 os.path.join(DIST, "DeepCodeCLI.exe"))
+    gui_src = os.path.join(GUI_OUT, "DeepCodeGUI.exe")
     if os.path.isfile(gui_src):
-        shutil.copy2(gui_src, os.path.join(RELEASE, "DeepCodeGUI.exe"))
+        shutil.copy2(gui_src, os.path.join(DIST, "DeepCodeGUI.exe"))
     else:
         print(f"!!! GUI exe not found at {gui_src} — check electron-builder output")
 
-    print("\n=== done ===")
-    for f in sorted(os.listdir(RELEASE)):
-        p = os.path.join(RELEASE, f)
-        print(f"  release/{f}   ({os.path.getsize(p)//1_000_000} MB)")
+    print("\n=== done — final builds in dist/ ===")
+    for f in sorted(os.listdir(DIST)):
+        p = os.path.join(DIST, f)
+        print(f"  dist/{f}   ({os.path.getsize(p)//1_000_000} MB)")
 
 
 if __name__ == "__main__":
