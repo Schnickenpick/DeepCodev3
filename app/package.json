@@ -50,7 +50,8 @@
     ],
     "win": {
       "target": "portable",
-      "icon": "assets/icon.ico"
+      "icon": "assets/icon.ico",
+      "signAndEditExecutable": false
     },
     "portable": {
       "artifactName": "DeepCodeGUI.exe"
