@@ -229,8 +229,16 @@ async def ws_endpoint(ws: WebSocket):
 
 
 def main():
+    import sys
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8765, log_level="info")
+    from uvicorn.config import LOGGING_CONFIG
+    # When frozen windowless (PyInstaller console=False), sys.stdout/stderr are
+    # None. uvicorn's default logging formatter calls stdout.isatty() and crashes
+    # ("NoneType has no attribute isatty"). Disable uvicorn's log config when
+    # there's no usable stdout.
+    log_config = None if sys.stdout is None else LOGGING_CONFIG
+    uvicorn.run(app, host="127.0.0.1", port=8765,
+                log_level="info", log_config=log_config)
 
 
 if __name__ == "__main__":
