@@ -67,7 +67,8 @@ def _clear_status():
 
 
 async def _run_stage(stage: str, task: str, context: dict, model_id: str,
-                     memory_block: str, status_msg: str, quiet: bool = False) -> str:
+                     memory_block: str, status_msg: str, quiet: bool = False,
+                     on_event=None) -> str:
     prompt = STAGE_PROMPTS[stage].format(task=task, **context)
     if memory_block:
         prompt = memory_block + "\n\n" + prompt
@@ -79,16 +80,26 @@ async def _run_stage(stage: str, task: str, context: dict, model_id: str,
             dots += 1
             if not quiet and dots % 20 == 0:
                 _status(f"{status_msg} {'.' * (dots // 20 % 4 + 1)}")
+            if on_event:
+                on_event({"type": "reasoning_delta", "stage": stage, "text": chunk["delta"]})
         if chunk.get("done"):
             break
     return text.strip()
 
 
 async def run_reasoning(task: str, model_id: str, level: str, system_prompt: str,
-                        memory_block: str = "", quiet: bool = False) -> str:
+                        memory_block: str = "", quiet: bool = False, on_event=None) -> str:
     """quiet=True suppresses all stdout (status spinner + reasoning panels) —
     required when called from a swarm worker, which must not write to the
-    shared terminal / TUI (see ultracode-workflows-lessons)."""
+    shared terminal / TUI (see ultracode-workflows-lessons).
+
+    on_event(dict), if given, is called with live per-stage progress so a
+    host with no terminal (the GUI bridge) can show *something* during what
+    can be several sequential full model generations (low=1 stage,
+    ultra=4 stages x up to 3 rounds): {"type": "reasoning_stage", "stage":
+    str, "label": str, "step": int, "total_steps": int} at stage start, then
+    {"type": "reasoning_delta", "stage": str, "text": str} as it streams.
+    """
     cfg = LEVELS.get(level, LEVELS["middle"])
     stages = cfg["stages"]
     extra_rounds = cfg["rounds"]
@@ -106,10 +117,15 @@ async def run_reasoning(task: str, model_id: str, level: str, system_prompt: str
         round_label = f" (round {rnd+1}/{all_rounds})" if all_rounds > 1 else ""
         for stage in stages:
             step += 1
-            msg = f"[{step}/{total_steps}] {STAGE_LABELS[stage]}{round_label}"
+            label = f"{STAGE_LABELS[stage]}{round_label}"
+            msg = f"[{step}/{total_steps}] {label}"
             _show_status(msg)
+            if on_event:
+                on_event({"type": "reasoning_stage", "stage": stage, "label": label,
+                          "step": step, "total_steps": total_steps})
             try:
-                result = await _run_stage(stage, task, context, model_id, memory_block, msg, quiet=quiet)
+                result = await _run_stage(stage, task, context, model_id, memory_block, msg,
+                                           quiet=quiet, on_event=on_event)
             except Exception as e:
                 _hide_status()
                 if not quiet:
@@ -117,11 +133,14 @@ async def run_reasoning(task: str, model_id: str, level: str, system_prompt: str
                 return ""
             context[stage] = result
             _hide_status()
-            _show_block(f"{STAGE_LABELS[stage]}{round_label}", result)
+            _show_block(label, result)
 
     # Final answer
     step += 1
     _show_status(f"[{step}/{total_steps}] Answering")
+    if on_event:
+        on_event({"type": "reasoning_stage", "stage": "answer", "label": "Answering",
+                  "step": step, "total_steps": total_steps})
     chain = "\n\n".join(
         f"{STAGE_LABELS[s].upper()}:\n{context[s]}"
         for s in stages if s in context
@@ -139,6 +158,8 @@ async def run_reasoning(task: str, model_id: str, level: str, system_prompt: str
         async for chunk in api.stream_chat(final_prompt, model_id):
             if chunk.get("delta"):
                 full_answer += chunk["delta"]
+                if on_event:
+                    on_event({"type": "reasoning_delta", "stage": "answer", "text": chunk["delta"]})
             if chunk.get("done"):
                 break
     except Exception as e:

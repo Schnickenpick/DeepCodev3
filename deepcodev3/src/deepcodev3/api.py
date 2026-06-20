@@ -3,7 +3,7 @@ import json
 import httpx
 from typing import AsyncIterator
 
-BASE = "https://unlimited-ai-proxy.sportsmoments97.workers.dev"
+BASE = "https://use-ai-production.up.railway.app"
 
 # Transient network failures (DNS blip "getaddrinfo failed", connect drop, read
 # timeout) that are safe to retry. Retry is only safe BEFORE the first delta is
@@ -18,17 +18,14 @@ _RETRYABLE = (
 _MAX_RETRIES = 4             # total attempts = 1 + retries
 _BACKOFF_BASE = 1.5         # seconds: 1.5, 3, 6, 12
 
-HEADERS = {
-    "Content-Type": "application/json",
-    "Accept": "*/*",
-    "Origin": "https://unlimited-ai-2jw.pages.dev",
-    "Referer": "https://unlimited-ai-2jw.pages.dev/",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-}
+HEADERS = {"Content-Type": "application/json"}
 
 
 async def _stream_endpoint(path: str, body: dict, timeout: float) -> AsyncIterator[dict]:
-    """POST a streaming request and yield parsed SSE data dicts.
+    """POST to an OpenAI-compatible streaming endpoint and yield normalized
+    dicts shaped {"delta": str} | {"done": True} | {"error": str} — the
+    contract agent.py/reasoning.py/chat.py expect, regardless of the
+    underlying proxy's wire format.
 
     Retries transient network failures (DNS/connect/read) with exponential
     backoff — but ONLY while no chunk has been yielded yet. Once the stream has
@@ -48,12 +45,24 @@ async def _stream_endpoint(path: str, body: dict, timeout: float) -> AsyncIterat
                         raw = line[6:].strip()
                         if not raw:
                             continue
+                        if raw == "[DONE]":
+                            yield {"done": True}
+                            return
                         try:
-                            chunk = json.loads(raw)
+                            frame = json.loads(raw)
                         except json.JSONDecodeError:
                             continue
-                        yielded = True
-                        yield chunk
+                        delta = (
+                            frame.get("choices", [{}])[0]
+                            .get("delta", {})
+                            .get("content", "")
+                        )
+                        if delta:
+                            yielded = True
+                            yield {"delta": delta}
+                        if frame.get("choices", [{}])[0].get("finish_reason"):
+                            yield {"done": True}
+                            return
             return
         except _RETRYABLE as e:
             # mid-stream failure or retries exhausted → give up, surface error
@@ -65,30 +74,13 @@ async def _stream_endpoint(path: str, body: dict, timeout: float) -> AsyncIterat
 
 
 async def stream_chat(message: str, model: str) -> AsyncIterator[dict]:
-    body = {"message": message, "model": model}
-    async for chunk in _stream_endpoint("/api/chat", body, timeout=300):
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": message}],
+        "stream": True,
+    }
+    async for chunk in _stream_endpoint("/v1/chat/completions", body, timeout=300):
         yield chunk
-
-
-async def stream_merge(message: str) -> AsyncIterator[dict]:
-    async for chunk in _stream_endpoint("/api/merge", {"message": message}, timeout=180):
-        yield chunk
-
-
-async def stream_search(query: str) -> AsyncIterator[dict]:
-    async for chunk in _stream_endpoint("/api/search", {"query": query}, timeout=120):
-        yield chunk
-
-
-async def extract_memory(conversation: list[dict], existing: list[str]) -> list[str]:
-    body = {"conversation": conversation, "existingMemory": existing}
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(f"{BASE}/api/memory", json=body, headers=HEADERS)
-            data = resp.json()
-            return data.get("facts", [])
-    except Exception:
-        return []
 
 
 async def extract_memory_split(conversation: list[dict], global_md: str, project_md: str, user_md: str) -> dict:
@@ -115,7 +107,7 @@ async def extract_memory_split(conversation: list[dict], global_md: str, project
     )
     try:
         result = ""
-        async for chunk in stream_chat(prompt, "claude-haiku-4-5-20251001"):
+        async for chunk in stream_chat(prompt, "gpt-5-mini"):
             if chunk.get("delta"):
                 result += chunk["delta"]
             if chunk.get("done"):
@@ -151,7 +143,7 @@ async def compress_memory(content: str, label: str) -> str:
     )
     try:
         result = ""
-        async for chunk in stream_chat(prompt, "claude-haiku-4-5-20251001"):
+        async for chunk in stream_chat(prompt, "gpt-5-mini"):
             if chunk.get("delta"):
                 result += chunk["delta"]
             if chunk.get("done"):

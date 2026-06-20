@@ -1016,31 +1016,14 @@ async def run_chat_stream(message: str, model_id: str, mode: str, memory_md: str
         sys_prompt = SYSTEM_PROMPT
 
     try:
-        if mode == "merge":
-            async for chunk in api.stream_merge(message):
-                if chunk.get("status"):
-                    renderer.print_status(chunk["status"])
-                if chunk.get("delta"):
-                    full_content += chunk["delta"]
-                    renderer.stream_token(chunk["delta"])
-                if chunk.get("reasoning"):
-                    reasoning = chunk["reasoning"]
-                if chunk.get("answer"):
-                    full_content = chunk["answer"]
-                if chunk.get("done"):
-                    break
-
-        elif mode == "search":
-            async for chunk in api.stream_search(message):
-                if chunk.get("status"):
-                    renderer.print_status(chunk["status"])
-                if chunk.get("delta"):
-                    full_content += chunk["delta"]
-                    renderer.stream_token(chunk["delta"])
-                if chunk.get("sources"):
-                    renderer.print_search_sources(chunk["sources"])
-                if chunk.get("done"):
-                    break
+        if mode in ("merge", "search"):
+            # The self-hosted proxy (use-ai-production) has no equivalent of
+            # the old backend's /api/merge or /api/search — it only exposes
+            # plain chat completions. Surface that clearly instead of
+            # crashing or silently falling back to a different mode.
+            label = "Merge AI" if mode == "merge" else "Web Search"
+            renderer.print_error(f"{label} mode isn't supported by the current backend — use plain chat instead.")
+            return "", ""
 
         else:
             extra = ""

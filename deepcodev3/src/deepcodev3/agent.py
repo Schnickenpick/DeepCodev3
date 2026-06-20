@@ -3,9 +3,10 @@ import json
 import re
 import sys
 from . import api, renderer
+from . import permissions
 from .tool_schema import TOOL_REGISTRY, TOOL_DESCRIPTIONS
 from .tools import ToolError
-from .permissions import ask_permission, OPTION_DENY
+from .permissions import ask_permission, ask_permission_async, OPTION_DENY
 from .system_prompt import SYSTEM_PROMPT
 
 TOOL_TAG_RE = re.compile(r'<tool>\s*(\{.*?\})\s*</tool>', re.DOTALL)
@@ -316,9 +317,10 @@ async def run_agent(user_message: str, conversation: list[dict], memory_md: str,
                 prompt = _build_prompt(conversation, memory_md, user_md, deepcode_md, project_memory_md)
         full_response = ""
         _show_thinking_dot = True
+        _emitted_len = 0  # how much of full_response we've already sent as "delta"
 
         async def _stream_with_indicator():
-            nonlocal full_response, _show_thinking_dot
+            nonlocal full_response, _show_thinking_dot, _emitted_len
             import asyncio
             dot_task = asyncio.get_event_loop().create_task(_thinking_dots())
             try:
@@ -335,10 +337,31 @@ async def run_agent(user_message: str, conversation: list[dict], memory_md: str,
                     delta = chunk.get("delta", "")
                     if delta:
                         full_response += delta
-                        # live token streaming for non-console frontends (GUI
+                        # Live token streaming for non-console frontends (GUI
                         # bridge). Harmless for the TUI, which ignores on_event.
+                        # Only forward text up to the start of an in-progress
+                        # <tool>/<quiz> tag — otherwise the raw JSON call leaks
+                        # into the chat bubble character-by-character before
+                        # _strip_tool_calls() ever gets a chance to remove it.
                         if on_event:
-                            on_event({"type": "delta", "text": delta})
+                            safe_end = len(full_response)
+                            for tag in ("<tool>", "<quiz>"):
+                                idx = full_response.find(tag, max(0, _emitted_len - len(tag)))
+                                if idx != -1:
+                                    safe_end = min(safe_end, idx)
+                            # Also withhold a trailing partial match of either
+                            # tag's opening (e.g. buffer ends in "<t" or
+                            # "<too") — it isn't a complete "<tool>" yet so
+                            # the .find() above won't catch it, but printing
+                            # it would still leak the tag's start char-by-char.
+                            for tag in ("<tool>", "<quiz>"):
+                                for k in range(min(len(tag) - 1, safe_end), 0, -1):
+                                    if full_response[safe_end - k:safe_end] == tag[:k]:
+                                        safe_end -= k
+                                        break
+                            if safe_end > _emitted_len:
+                                on_event({"type": "delta", "text": full_response[_emitted_len:safe_end]})
+                                _emitted_len = safe_end
             finally:
                 _show_thinking_dot = False
                 dot_task.cancel()
@@ -458,8 +481,19 @@ async def run_agent(user_message: str, conversation: list[dict], memory_md: str,
                 conversation.append({"role": "tool_result", "content": err})
                 continue
 
+            # Permission checks normally only run in the terminal (swarm_mode
+            # False). UltraCode's headless swarm workers are also swarm_mode
+            # True but always run under MODE_AUTO/MODE_READONLY, never
+            # MODE_INTERACTIVE — so gating on the mode here lets the GUI/VS
+            # Code bridge (which *does* set MODE_INTERACTIVE) get real
+            # permission prompts without re-enabling them for swarm workers.
             if not swarm_mode:
                 decision = ask_permission(name, args)
+                if decision == OPTION_DENY:
+                    conversation.append({"role": "tool_result", "content": "User denied."})
+                    continue
+            elif permissions.get_mode() == permissions.MODE_INTERACTIVE:
+                decision = await ask_permission_async(name, args)
                 if decision == OPTION_DENY:
                     conversation.append({"role": "tool_result", "content": "User denied."})
                     continue

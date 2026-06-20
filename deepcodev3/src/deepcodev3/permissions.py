@@ -1,6 +1,8 @@
 from __future__ import annotations
 import fnmatch
 import sys
+import threading
+import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -13,14 +15,19 @@ OPTION_DENY        = "deny"
 OPTION_DENY_ALWAYS = "deny_always"
 
 # ── permission modes (toggled with shift+tab) ─────────────────────────────────
-# default  : prompt before every non-read tool call (the safe baseline)
-# auto     : auto-allow ALL tool calls (hard-deny patterns still apply)
-# readonly : allow read-category tools, silently DENY all write/exec/network.
-#            Used by the GUI when "Agent" is off — no interactive picker needed
-#            (the GUI can't show one yet), and no shell access to strangers.
+# default     : prompt before every non-read tool call (the safe baseline)
+# auto        : auto-allow ALL tool calls (hard-deny patterns still apply)
+# readonly    : allow read-category tools, silently DENY all write/exec/network.
+#               Used by the GUI when "Agent" is off and there's no remote picker
+#               wired up, so no shell access to strangers.
+# interactive : like default, but the prompt is asked over a remote channel
+#               (GUI websocket / VS Code extension) instead of the terminal's
+#               raw-keyboard picker. Used by the GUI/extension bridge when
+#               "Agent" is on — see ask_permission_async below.
 MODE_DEFAULT = "default"
 MODE_AUTO = "auto"
 MODE_READONLY = "readonly"
+MODE_INTERACTIVE = "interactive"
 _MODE_CYCLE = [MODE_DEFAULT, MODE_AUTO]  # only these two cycle via shift+tab
 
 _mode = MODE_DEFAULT
@@ -32,7 +39,7 @@ def get_mode() -> str:
 
 def set_mode(mode: str):
     global _mode
-    if mode in (MODE_DEFAULT, MODE_AUTO, MODE_READONLY):
+    if mode in (MODE_DEFAULT, MODE_AUTO, MODE_READONLY, MODE_INTERACTIVE):
         _mode = mode
 
 
@@ -321,38 +328,68 @@ def TOOL_DESCRIPTIONS_FALLBACK(tool_name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Remote (GUI / VS Code extension) interactive picker
+# ---------------------------------------------------------------------------
+# The terminal's _prompt_choice() blocks on raw keyboard reads in-process,
+# which works because the TUI owns stdin directly. A remote host (the GUI
+# bridge, the VS Code extension) instead needs to ship the request out over a
+# websocket/IPC channel and wait for a reply that arrives on a *different*
+# thread (the asyncio event loop's message-receive handler). We bridge that
+# with a plain threading.Event so ask_permission_async can be awaited from the
+# host's event loop via run_in_executor without blocking the loop itself.
+
+# host-registered callback: (request_id, tool_name, args) -> None.
+# It must, eventually and from any thread, call resolve_remote_request(id, choice).
+_remote_request_handler = None
+_pending_remote: dict[str, "_PendingRequest"] = {}
+
+
+class _PendingRequest:
+    __slots__ = ("event", "choice")
+
+    def __init__(self):
+        self.event = threading.Event()
+        self.choice: str | None = None
+
+
+def set_remote_request_handler(handler):
+    """Host call: register the function that delivers a permission_request to
+    the connected client (e.g. emits a websocket event)."""
+    global _remote_request_handler
+    _remote_request_handler = handler
+
+
+def resolve_remote_request(request_id: str, choice: str):
+    """Host call: feed back the client's decision for a pending request id."""
+    pending = _pending_remote.get(request_id)
+    if pending is None:
+        return
+    pending.choice = choice if choice in (o[0] for o in _OPTIONS) else OPTION_DENY
+    pending.event.set()
+
+
+def _prompt_choice_remote(tool_name: str, args: dict) -> str:
+    if _remote_request_handler is None:
+        # No host wired up an interactive channel — fail safe.
+        return OPTION_DENY
+    request_id = str(uuid.uuid4())
+    pending = _PendingRequest()
+    _pending_remote[request_id] = pending
+    try:
+        _remote_request_handler(request_id, tool_name, args)
+        pending.event.wait()
+        return pending.choice or OPTION_DENY
+    finally:
+        _pending_remote.pop(request_id, None)
+
+
+# ---------------------------------------------------------------------------
 # Main entrypoint
 # ---------------------------------------------------------------------------
 
-def ask_permission(tool_name: str, args: dict) -> str:
-    """Returns OPTION_ALLOW or OPTION_DENY. Signature-compatible with agent.py call site."""
-    subject = _subject_for(tool_name, args)
-
-    if _check_hard_deny(tool_name, subject):
-        from . import renderer
-        renderer.print_error(f"Blocked: '{subject}' matches a hard-coded dangerous-command pattern.")
-        return OPTION_DENY
-
-    rule_decision = _check_rules(tool_name, subject)
-    if rule_decision == "deny":
-        return OPTION_DENY
-    if rule_decision == "allow":
-        return OPTION_ALLOW
-
-    category = category_for_tool(tool_name)
-    if category == "read":
-        return OPTION_ALLOW
-
-    # read-only mode: deny all write/exec/network (GUI with Agent off).
-    if _mode == MODE_READONLY:
-        return OPTION_DENY
-
-    # permission mode short-circuits the interactive picker
-    if _mode == MODE_AUTO:
-        return OPTION_ALLOW
-
-    choice = _prompt_choice(tool_name, args)
-
+def _apply_choice(tool_name: str, subject: str, choice: str) -> str:
+    """Shared decision logic for both the terminal and remote pickers:
+    translate the 4-option choice into allow/deny and persist *_always rules."""
     if choice == OPTION_ALLOW:
         return OPTION_ALLOW
     if choice == OPTION_DENY:
@@ -370,3 +407,71 @@ def ask_permission(tool_name: str, args: dict) -> str:
         return OPTION_DENY
 
     return OPTION_DENY
+
+
+def _precheck(tool_name: str, args: dict) -> tuple[str, str | None]:
+    """Shared early-exit checks. Returns (subject, decision); decision is None
+    if no early exit applies and the caller must still ask."""
+    subject = _subject_for(tool_name, args)
+
+    if _check_hard_deny(tool_name, subject):
+        from . import renderer
+        renderer.print_error(f"Blocked: '{subject}' matches a hard-coded dangerous-command pattern.")
+        return subject, OPTION_DENY
+
+    rule_decision = _check_rules(tool_name, subject)
+    if rule_decision == "deny":
+        return subject, OPTION_DENY
+    if rule_decision == "allow":
+        return subject, OPTION_ALLOW
+
+    if category_for_tool(tool_name) == "read":
+        return subject, OPTION_ALLOW
+
+    return subject, None
+
+
+def ask_permission(tool_name: str, args: dict) -> str:
+    """Returns OPTION_ALLOW or OPTION_DENY. Signature-compatible with agent.py call site."""
+    subject, decision = _precheck(tool_name, args)
+    if decision is not None:
+        return decision
+
+    # read-only mode: deny all write/exec/network (GUI with Agent off).
+    if _mode == MODE_READONLY:
+        return OPTION_DENY
+
+    # permission mode short-circuits the interactive picker
+    if _mode == MODE_AUTO:
+        return OPTION_ALLOW
+
+    if _mode == MODE_INTERACTIVE:
+        choice = _prompt_choice_remote(tool_name, args)
+    else:
+        choice = _prompt_choice(tool_name, args)
+
+    return _apply_choice(tool_name, subject, choice)
+
+
+async def ask_permission_async(tool_name: str, args: dict) -> str:
+    """Async-friendly variant for hosts running an asyncio event loop (the GUI/
+    extension bridge). Only the remote-interactive wait runs off-loop; every
+    other branch is instant and returns synchronously."""
+    subject, decision = _precheck(tool_name, args)
+    if decision is not None:
+        return decision
+
+    if _mode == MODE_READONLY:
+        return OPTION_DENY
+    if _mode == MODE_AUTO:
+        return OPTION_ALLOW
+
+    if _mode != MODE_INTERACTIVE:
+        # Async hosts never own a real keyboard; treat anything else as deny
+        # rather than silently blocking the event loop on _prompt_choice.
+        return OPTION_DENY
+
+    import asyncio
+    loop = asyncio.get_event_loop()
+    choice = await loop.run_in_executor(None, _prompt_choice_remote, tool_name, args)
+    return _apply_choice(tool_name, subject, choice)
