@@ -73,7 +73,7 @@ agent happens through them:
 | `/new` | Start a new conversation |
 | `/compact` | Summarize the conversation to save context |
 | `/history` | Quick list of past conversations |
-| `/color <name|#hex>` | Theme the UI accent color |
+| `/color` ` <name/#hex>` | Theme the UI accent color |
 | `/notify` | Toggle the bell notification |
 | `/merge` | Toggle Merge AI mode |
 | `/search` | Toggle Web Search mode |
@@ -91,8 +91,7 @@ Other things worth knowing:
 ## Heads up, please read
 
 DeepCode is a coding assistant. It is **not** designed to roleplay, bypass
-its own safety behavior, or act as a general-purpose "jailbreak" target, and
-asking it to will just waste your time and everyone else's in support. If
+any safety behavior, or act as a general-purpose "jailbreak" tool, If you want a jailbreak look in the discord jailbreak channel, dont annoy staff or me. If
 you've got a feature request or you think the agent is behaving wrong on a
 *coding* task, that's exactly what the [Discord](https://discord.gg/cgVa2rqWKv)
 and the issue tracker are for.
