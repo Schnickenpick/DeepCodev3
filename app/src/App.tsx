@@ -11,6 +11,7 @@ type WsEvent =
   | { type: "tool_call"; name: string; args: Record<string, unknown> }
   | { type: "tool_result"; name: string; ok: boolean }
   | { type: "permission_request"; id: string; name: string; args: Record<string, unknown> }
+  | { type: "quiz_request"; id: string; question: string; options: string[] }
   | { type: "tokens"; count: number }
   | { type: "turn_done"; text: string; sessionId?: string }
   | { type: "cancelled" }
@@ -23,6 +24,7 @@ type UltraCodeGroup = { id: string; role: string; goal: string; depends_on: stri
 type UltraCodeStatus = { type: "ultracode_status"; id: string; task: string; finished: boolean; failed: boolean; error: string; groups: UltraCodeGroup[] };
 
 type PermissionRequest = { id: string; name: string; args: Record<string, unknown> };
+type QuizRequest = { id: string; question: string; options: string[] };
 
 type ToolCard = { name: string; args: Record<string, unknown>; ok?: boolean };
 type Msg =
@@ -55,10 +57,11 @@ export default function App() {
 
   // toggles — Agent defaults OFF: tools (shell/file-write) require an explicit
   // opt-in. Read-only until the user turns Agent on.
-  const [agent, setAgent] = useState(false);
+  const [agentMode, setAgentMode] = useState<"off" | "ask" | "auto">("off");
   const [reasoning, setReasoning] = useState("off");
   const [permRequest, setPermRequest] = useState<PermissionRequest | null>(null);
   const permQueueRef = useRef<PermissionRequest[]>([]);
+  const [quizRequest, setQuizRequest] = useState<QuizRequest | null>(null);
   const [projectDir, setProjectDir] = useState<string>("");
 
   const [searchOpen, setSearchOpen] = useState(false);
@@ -117,7 +120,7 @@ export default function App() {
       setModel(d.default);
     }).catch(() => {});
     fetch(`${API}/api/config`).then((r) => r.json()).then((d) => {
-      setAgent(d.agent ?? true);
+      setAgentMode(d.agent ? "ask" : "off");
       setReasoning(d.reasoning ?? "off");
     }).catch(() => {});
     refreshSessions();
@@ -156,6 +159,13 @@ export default function App() {
       // the user answers the first prompt.
       permQueueRef.current.push({ id: ev.id, name: ev.name, args: ev.args });
       setPermRequest((cur) => cur ?? permQueueRef.current.shift() ?? null);
+      return;
+    }
+    if (ev.type === "quiz_request") {
+      // Server awaits one answer before continuing the agent loop — only one
+      // quiz is ever in flight per session, no queue needed (unlike permission).
+      setQuizRequest({ id: ev.id, question: ev.question, options: ev.options });
+      setThinking(false);
       return;
     }
     if (ev.type === "loaded") {
@@ -252,8 +262,8 @@ export default function App() {
   const send = () => {
     const text = input.trim();
     if (!text || !connected || busy) return;
-    if (text.startsWith("/ultracode ")) {
-      runUltracode(text.slice("/ultracode ".length).trim());
+    if (ultracodeMode || text.startsWith("/ultracode ")) {
+      runUltracode(text.startsWith("/ultracode ") ? text.slice("/ultracode ".length).trim() : text);
       return;
     }
     setMessages((m) => [...m, { role: "user", text }]);
@@ -267,7 +277,14 @@ export default function App() {
     wsRef.current?.send(JSON.stringify({
       type: "chat",
       text,
-      opts: { model, agent, reasoning, interactive: true },
+      opts: {
+        model,
+        reasoning,
+        agent: agentMode !== "off",
+        // "ask" -> MODE_INTERACTIVE (permission_request round-trip);
+        // "auto" -> MODE_AUTO (auto-allow, no prompts). See server.py run_turn.
+        interactive: agentMode === "ask",
+      },
     }));
   };
 

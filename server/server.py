@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
 
 # Make the core importable without installing it.
@@ -179,6 +180,7 @@ class _Session:
         self.store = storage.new_session(self.model_id)  # persisted session dict
         self.task: asyncio.Task | None = None  # the in-flight run_turn, if any
         self.ultracode_task: asyncio.Task | None = None
+        self._pending_quiz: dict[str, asyncio.Future] = {}
         permissions.set_remote_request_handler(self._on_permission_request)
 
     def stop(self):
@@ -228,6 +230,15 @@ class _Session:
                 return
             await self.ws.send_text(json.dumps(event))
 
+    def answer_quiz(self, quiz_id: str, answer: str):
+        """Host call: feed back the client's pick/free-text for a pending
+        <quiz> block. Runs on the event loop already (called from the ws
+        receive loop), so a plain asyncio.Future is enough — no thread
+        bridging needed like permissions.py's remote-request machinery."""
+        fut = self._pending_quiz.get(quiz_id)
+        if fut and not fut.done():
+            fut.set_result(answer)
+
     async def run_turn(self, text: str, opts: dict):
         model_id = opts.get("model")
         if model_id:
@@ -269,6 +280,8 @@ class _Session:
                 if plan:
                     effective = f"{text}\n\n[Your private reasoning/plan:\n{plan}\n]"
 
+            from deepcodev3.chat import _parse_quiz, DEFAULT_QUIZ_MAX
+
             visible, self.conversation = await agent.run_agent(
                 effective,
                 self.conversation,
@@ -280,6 +293,47 @@ class _Session:
                 swarm_mode=True,
                 on_event=self.emit,
             )
+
+            # The model can ask a clarifying question mid-turn via a <quiz>
+            # block instead of acting (see chat.py's terminal agent_quiz
+            # loop). agent.run_agent() returns that tag embedded raw in
+            # `visible` — round-trip it to the client as quiz_request/
+            # quiz_response and keep feeding answers back as new user turns
+            # until the model stops asking.
+            clean, quiz_data = _parse_quiz(visible, DEFAULT_QUIZ_MAX)
+            while quiz_data:
+                quiz_id = str(uuid.uuid4())
+                fut: asyncio.Future = self.loop.create_future()
+                self._pending_quiz[quiz_id] = fut
+                await self.ws.send_text(json.dumps({
+                    "type": "quiz_request",
+                    "id": quiz_id,
+                    "question": quiz_data.get("question", ""),
+                    "options": quiz_data["options"],
+                }))
+                try:
+                    answer = await fut
+                finally:
+                    self._pending_quiz.pop(quiz_id, None)
+
+                followup = (
+                    f"[Clarification answer: {answer}]\n\n"
+                    "Proceed using this answer. Do not re-ask the same question. Act."
+                )
+                visible, self.conversation = await agent.run_agent(
+                    followup,
+                    self.conversation,
+                    self.memory_md,
+                    self.user_md,
+                    self.model_id,
+                    self.deepcode_md,
+                    self.project_md,
+                    swarm_mode=True,
+                    on_event=self.emit,
+                )
+                clean, quiz_data = _parse_quiz(visible, DEFAULT_QUIZ_MAX)
+            visible = clean
+
             self.store["messages"].append(
                 {"role": "assistant", "content": visible, "model": self.model_id})
             if not self.store.get("title") and visible:
@@ -440,6 +494,8 @@ async def ws_endpoint(ws: WebSocket):
                     session.run_ultracode(msg.get("text", ""), msg.get("opts", {})))
             elif mtype == "permission_response":
                 permissions.resolve_remote_request(msg.get("id", ""), msg.get("decision", ""))
+            elif mtype == "quiz_response":
+                session.answer_quiz(msg.get("id", ""), msg.get("answer", ""))
             elif mtype == "load":
                 session.load(msg.get("id", ""))
                 await ws.send_text(json.dumps(
