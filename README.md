@@ -9,7 +9,7 @@ A Claude-Code-style terminal coding agent, written in Python. Streams
 responses, runs file/shell tools behind a permission layer, multi-stage
 reasoning, an UltraCode agent swarm, and a desktop GUI.
 
-**[Join the Discord](https://discord.gg/cgVa2rqWKv)** — support, updates, bug reports.
+**[Join the Discord](https://discord.gg/8WU56Drt7F)** — support, updates, bug reports.
 
 </div>
 
@@ -94,7 +94,7 @@ Other things worth knowing:
 DeepCode is a coding assistant. It is **not** designed to roleplay, bypass
 any safety behavior, or act as a general-purpose "jailbreak" tool, If you want a jailbreak look in the discord jailbreak channel, dont annoy staff or me. If
 you've got a feature request or you think the agent is behaving wrong on a
-*coding* task, that's exactly what the [Discord](https://discord.gg/cgVa2rqWKv)
+*coding* task, that's exactly what the [Discord](https://discord.gg/8WU56Drt7F)
 and the issue tracker are for.
 
 ## Desktop GUI
@@ -136,5 +136,5 @@ Requires PyInstaller and the GUI deps installed (`cd app && npm install`).
 
 ## Support
 
-- **Discord:** https://discord.gg/cgVa2rqWKv
+- **Discord:** https://discord.gg/8WU56Drt7F
 - **Issues:** open one on this repo
