@@ -284,6 +284,17 @@ def print_models_list(current_model_id: str):
     console.print()
 
 
+def print_live_models_list(models: list[dict], current_model_id: str):
+    """Flat listing for models fetched live from the configured backend —
+    no provider/tier metadata exists for an arbitrary server, unlike the
+    built-in static catalog."""
+    console.print()
+    for m in models:
+        active = " ◀" if m["id"] == current_model_id else ""
+        console.print(f"    [dim]{m['name']:<30}[/dim][cyan]{m['id']}[/cyan][green]{active}[/green]")
+    console.print()
+
+
 def print_user_label(text: str):
     console.print()
     console.print(f"  [bold white]You[/bold white]")

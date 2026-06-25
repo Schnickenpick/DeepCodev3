@@ -1,9 +1,81 @@
+from __future__ import annotations
 import asyncio
 import json
+import os
 import httpx
 from typing import AsyncIterator
 
-BASE = "https://use-ai-production.up.railway.app"
+from . import storage
+
+_DEFAULT_BASE = "https://use-ai-production.up.railway.app"
+_DEFAULT_MODELS_PATH = "/models"
+
+
+def get_base_url() -> str:
+    """Resolve the backend base URL: env var > saved config > built-in default.
+    Lets anyone point DeepCode at their own server/provider (self-hosted proxy,
+    Groq, OpenRouter, etc.) without touching code."""
+    env = os.environ.get("DEEPCODE_BASE_URL")
+    if env:
+        return env.rstrip("/")
+    cfg = storage.load_config()
+    return (cfg.get("base_url") or _DEFAULT_BASE).rstrip("/")
+
+
+def get_api_key() -> str | None:
+    env = os.environ.get("DEEPCODE_API_KEY")
+    if env:
+        return env
+    cfg = storage.load_config()
+    return cfg.get("api_key") or None
+
+
+def _headers() -> dict:
+    h = {"Content-Type": "application/json"}
+    key = get_api_key()
+    if key:
+        h["Authorization"] = f"Bearer {key}"
+    return h
+
+
+def get_models_path() -> str:
+    """Which path lists available models on the configured backend — varies
+    by provider convention (use.ai's own /models vs. the OpenAI/Anthropic-style
+    /v1/models most other proxies use)."""
+    env = os.environ.get("DEEPCODE_MODELS_PATH")
+    if env:
+        return "/" + env.strip("/")
+    cfg = storage.load_config()
+    path = cfg.get("models_path") or _DEFAULT_MODELS_PATH
+    return "/" + path.strip("/")
+
+
+async def fetch_models() -> list[dict] | None:
+    """GET the configured models endpoint. Normalizes both shapes seen in the
+    wild: {"models": [{"slug"/"id", "label"/"name"}]} and the OpenAI/Anthropic
+    {"data": [{"id", ...}]}. Returns None on any failure — callers fall back
+    to the static catalog rather than erroring the whole /models command."""
+    base = get_base_url()
+    path = get_models_path()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{base}{path}", headers=_headers())
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        return None
+
+    if isinstance(data.get("models"), list):
+        return [
+            {"id": m.get("slug") or m.get("id", ""), "name": m.get("label") or m.get("name") or m.get("slug", "")}
+            for m in data["models"] if m.get("slug") or m.get("id")
+        ]
+    if isinstance(data.get("data"), list):
+        return [
+            {"id": m.get("id", ""), "name": m.get("display_name") or m.get("name") or m.get("id", "")}
+            for m in data["data"] if m.get("id")
+        ]
+    return None
 
 # Transient network failures (DNS blip "getaddrinfo failed", connect drop, read
 # timeout) that are safe to retry. Retry is only safe BEFORE the first delta is
@@ -18,8 +90,6 @@ _RETRYABLE = (
 _MAX_RETRIES = 4             # total attempts = 1 + retries
 _BACKOFF_BASE = 1.5         # seconds: 1.5, 3, 6, 12
 
-HEADERS = {"Content-Type": "application/json"}
-
 
 async def _stream_endpoint(path: str, body: dict, timeout: float) -> AsyncIterator[dict]:
     """POST to an OpenAI-compatible streaming endpoint and yield normalized
@@ -33,11 +103,13 @@ async def _stream_endpoint(path: str, body: dict, timeout: float) -> AsyncIterat
     text, so it propagates to the caller.
     """
     attempt = 0
+    base = get_base_url()
+    headers = _headers()
     while True:
         yielded = False
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream("POST", f"{BASE}{path}", json=body, headers=HEADERS) as resp:
+                async with client.stream("POST", f"{base}{path}", json=body, headers=headers) as resp:
                     resp.raise_for_status()
                     async for line in resp.aiter_lines():
                         if not line.startswith("data: "):

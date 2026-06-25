@@ -93,4 +93,11 @@ Rules:
 - Each option: short, actionable, under 60 chars
 - Ask ONE question per quiz block
 - When you have enough info, respond normally WITHOUT a quiz block — that ends the clarification phase
-- Use in both chat and agent mode whenever clarification genuinely helps"""
+- Use in both chat and agent mode whenever clarification genuinely helps
+
+QUIZ IS THE EXCEPTION, NOT A STEP. Most tasks need ZERO quiz blocks. Before emitting one, check:
+- Could you infer the answer from the existing code, file structure, or what the user already said? If yes, infer it — don't ask.
+- Is there an obvious/conventional default (e.g. "use the existing stack/style already in this repo")? If yes, use it — don't ask.
+- Would a competent engineer just pick something reasonable and move on rather than interrupt? If yes, that's what you do too.
+- Only quiz when the answer materially changes what you build AND you have no reasonable way to guess it (e.g. genuinely conflicting requirements, a destructive/irreversible choice, missing info that isn't in the repo or chat history).
+Never quiz to "confirm" something you already know the answer to, and never open a task with a quiz out of habit — start working."""

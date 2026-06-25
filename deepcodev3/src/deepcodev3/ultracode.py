@@ -200,11 +200,20 @@ might need just 1-5 agents total; large builds might need 50-200+. Don't over-pr
 pick the smallest swarm that can do the job well. Set "total_agents" in your output to your choice.
 - Each group has at most {max_children} workers
 - If a group is too large (>100 workers needed), set depth=1 so it spawns sub-groups recursively
-- depend_on lists the group IDs that must finish before this group starts
+- depends_on lists the group IDs that must finish before this group starts
 - artifact_name is a short slug (snake_case) for the output this group produces
 - "goal" MUST name the exact output file(s) the group will write to disk (e.g. "Write game.html", "Write src/engine.js")
-- Groups that can run in parallel should have no shared deps
-- Order deps correctly: if group B needs group A's output, B must list A in depends_on
+- DEFAULT TO SEQUENTIAL: if you are not certain two groups are truly independent, add a dependency. \
+Only leave depends_on empty when a group genuinely needs NOTHING from any other group to start \
+(e.g. it has its own isolated file and isolated goal).
+- Think in build steps, not file boundaries: if group B reads, calls, imports, or extends \
+something group A produces (a schema, an API, a shared type, a base component), B must list A \
+in depends_on — even if A and B write different files.
+- Chain steps explicitly: for a task with a natural order (e.g. design -> backend -> frontend -> \
+polish), each later step depends on the step(s) right before it. Don't leave them all at depends_on: [] \
+just because they're separate groups — that makes them fire simultaneously and race each other.
+- Only mark groups as parallel (no shared deps) when they are genuinely independent verticals that \
+don't read each other's output (e.g. two unrelated standalone pages, or backend vs. a static landing page).
 - Scale group count to match the task: big task = more groups, small = fewer
 - Assign each group a clear role and specific goal
 
@@ -317,7 +326,7 @@ async def run_leader(task: str, model_id: str,
             id=g["id"],
             role=g.get("role", g["id"]),
             goal=g.get("goal", ""),
-            depends_on=g.get("depends_on", []),
+            depends_on=g.get("depends_on", g.get("depend_on", [])),
             size=min(int(g.get("size", 3)), MAX_CHILDREN),
             depth=int(g.get("depth", 0)),
             artifact_name=g.get("artifact_name", g["id"].lower()),

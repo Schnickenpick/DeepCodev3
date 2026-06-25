@@ -139,16 +139,21 @@ def _pick_option(options: list[str], session) -> str | None:
             _render(selected)
 
 
-def _model_picker(current_model_id: str) -> str | None:
-    """Arrow-key model picker grouped by provider. Returns chosen model id, or None if cancelled."""
+def _model_picker(current_model_id: str, models: list[dict] | None = None) -> str | None:
+    """Arrow-key model picker. With the built-in static catalog (models=None),
+    groups by provider and shows tier. With a live-fetched list (flat, no
+    provider/tier metadata), renders a plain flat list instead."""
     from .models import MODELS, PROVIDERS, TIER_COLORS
+    live = models is not None
+    if not live:
+        models = MODELS
 
     # Build a flat list of rows: ("header", provider_name) or ("model", model_dict)
     rows: list[tuple[str, object]] = []
     last_provider = None
     selectable: list[int] = []  # indices into rows that are selectable
-    for m in MODELS:
-        if m["provider"] != last_provider:
+    for m in models:
+        if not live and m["provider"] != last_provider:
             last_provider = m["provider"]
             p = PROVIDERS.get(last_provider, {})
             rows.append(("header", p.get("name", last_provider)))
@@ -168,10 +173,13 @@ def _model_picker(current_model_id: str) -> str | None:
                 renderer.console.print(f"  [bold]{val}[/bold]")
                 continue
             m = val
-            tier_color = TIER_COLORS.get(m["tier"], "white")
             is_cur = m["id"] == current_model_id
             mark = " ◀" if is_cur else ""
-            label = f"{m['name']:<24} [{tier_color}]{m['tier']:<10}[/{tier_color}]{mark}"
+            if live:
+                label = f"{m['name']:<30} [cyan]{m['id']}[/cyan]{mark}"
+            else:
+                tier_color = TIER_COLORS.get(m["tier"], "white")
+                label = f"{m['name']:<24} [{tier_color}]{m['tier']:<10}[/{tier_color}]{mark}"
             if ri == selectable[selected_idx]:
                 renderer.console.print(f"  [bold {renderer.PERMISSION_BLUE}]❯ {label}[/bold {renderer.PERMISSION_BLUE}]")
             else:
@@ -322,9 +330,10 @@ COMMANDS = [
     ("/notify",         "Toggle bell notification on/off"),
     ("/color",          "Set UI accent color — e.g. /color blue, /color #78aaff"),
     ("/context",        "Scan project for context — /context on|off to toggle auto-scan"),
-    ("/reasoning",      "Set reasoning level — off/low/middle/high/ultra"),
+    ("/reasoning",      "Set reasoning level — /reasoning for picker, or off/low/middle/high/ultra"),
     ("/agent",          "Toggle agent mode (file/shell tools)"),
     ("/model",          "Switch model — e.g. /model opus"),
+    ("/server",         "Set backend URL/key/models path — /server, /server <url> [key], /server models=<path>, /server reset"),
     ("/models",         "List all 34 models"),
     ("/merge",          "Toggle Merge AI mode"),
     ("/search",         "Toggle Web Search mode"),
@@ -1277,8 +1286,17 @@ async def main_loop(resume=None):
                             await _run_bootstrap()
 
             elif cmd == "/model":
+                # Only bother fetching live when a non-default backend is configured —
+                # otherwise keep the nicer grouped static catalog for use.ai.
+                live_models = await api.fetch_models() if cfg.get("base_url") else None
                 if arg:
-                    found = find_model(arg)
+                    found = None
+                    if live_models:
+                        q = arg.lower().strip()
+                        found = next((m for m in live_models
+                                      if q in m["id"].lower() or q in m["name"].lower()), None)
+                    if not found:
+                        found = find_model(arg)
                     if found:
                         model_id = found["id"]
                         mode = "chat"
@@ -1289,7 +1307,7 @@ async def main_loop(resume=None):
                     else:
                         renderer.print_error(f"No model matching '{arg}'. Try /models.")
                 else:
-                    chosen_id = _model_picker(model_id)
+                    chosen_id = _model_picker(model_id, models=live_models)
                     if chosen_id:
                         model_id = chosen_id
                         mode = "chat"
@@ -1299,7 +1317,12 @@ async def main_loop(resume=None):
                         renderer.print_model_status(model_id, mode, agent_mode)
 
             elif cmd == "/models":
-                renderer.print_models_list(model_id)
+                live = await api.fetch_models() if cfg.get("base_url") else None
+                if live:
+                    renderer.print_info(f"Live from {api.get_base_url()}{api.get_models_path()}:")
+                    renderer.print_live_models_list(live, model_id)
+                else:
+                    renderer.print_models_list(model_id)
 
             elif cmd == "/merge":
                 mode = "chat" if mode == "merge" else "merge"
@@ -1360,17 +1383,37 @@ async def main_loop(resume=None):
 
             elif cmd == "/reasoning":
                 lvl = arg.lower().strip()
-                if lvl == "off" or (not lvl and reasoning_level):
+                if not lvl:
+                    levels = ["off"] + list(REASONING_LEVELS.keys())
+                    cur = reasoning_level or "off"
+                    labeled = [f"{l} (current)" if l == cur else l for l in levels]
+                    options = labeled + ["Cancel"]
+                    renderer.console.print()
+                    renderer.console.print(f"  [bold]Reasoning level[/bold]  [dim]current: {cur}[/dim]")
+                    choice = _pick_option(options, controller)
+                    # _pick_option's last list item is its dedicated "free text" slot and
+                    # comes back as the literal string "__free__", not its label — map it
+                    # back to "Cancel" (the actual last option here) rather than mis-parsing it.
+                    if choice == "__free__":
+                        choice = "Cancel"
+                    chosen_lvl = None if choice in (None, "Cancel") else choice.split(" ", 1)[0]
+                    if chosen_lvl and chosen_lvl != cur:
+                        reasoning_level = None if chosen_lvl == "off" else chosen_lvl
+                        cfg["reasoning"] = reasoning_level
+                        storage.save_config(cfg)
+                        renderer.print_info(f"Reasoning: {chosen_lvl}")
+                elif lvl == "off":
                     reasoning_level = None
                     cfg["reasoning"] = None
                     renderer.print_info("Reasoning OFF.")
+                    storage.save_config(cfg)
                 elif lvl in REASONING_LEVELS:
                     reasoning_level = lvl
                     cfg["reasoning"] = lvl
                     renderer.print_info(f"Reasoning: {lvl}")
+                    storage.save_config(cfg)
                 else:
                     renderer.print_error(f"Unknown level '{lvl}'. Use: off, low, middle, high, ultra")
-                storage.save_config(cfg)
 
             elif cmd == "/color":
                 spec = arg.strip()
@@ -1392,6 +1435,79 @@ async def main_loop(resume=None):
                         renderer.print_banner(model_id)
                         renderer.print_model_status(model_id, mode, agent_mode)
                         renderer.print_info(f"Color set to {spec}.")
+
+            elif cmd == "/server":
+                spec = arg.strip()
+                _NO_KEY_WORDS = {"none", "no", "-", "skip", "n/a"}
+                if not spec:
+                    cur = cfg.get("base_url") or api._DEFAULT_BASE
+                    has_key = bool(cfg.get("api_key"))
+                    cur_models_path = cfg.get("models_path") or api._DEFAULT_MODELS_PATH
+                    renderer.console.print()
+                    renderer.console.print(f"  [bold]Backend[/bold]  [dim]{cur}{' · API key set' if has_key else ' · no API key'} · models: {cur_models_path}[/dim]")
+                    options = ["Enter a custom URL", "Set models endpoint path",
+                               "Reset to default", "Cancel", "Keep current"]
+                    choice = _pick_option(options, controller)
+                    if choice in (None, "Cancel", "Keep current", "__free__"):
+                        pass
+                    elif choice == "Reset to default":
+                        cfg.pop("base_url", None)
+                        cfg.pop("api_key", None)
+                        cfg.pop("models_path", None)
+                        storage.save_config(cfg)
+                        renderer.print_info(f"Backend reset to default ({api._DEFAULT_BASE}).")
+                    elif choice == "Set models endpoint path":
+                        renderer.print_info(f"Models endpoint path (current: {cur_models_path}). "
+                                             "Common values: /models or /v1/models")
+                        path_in = await controller.read_one() if controller else None
+                        path_in = (path_in or "").strip()
+                        if path_in:
+                            cfg["models_path"] = "/" + path_in.strip("/")
+                            storage.save_config(cfg)
+                            renderer.print_info(f"Models endpoint set to {cfg['models_path']}.")
+                    elif choice == "Enter a custom URL":
+                        renderer.print_info("Base URL (http:// or https://):")
+                        url_in = await controller.read_one() if controller else None
+                        url_in = (url_in or "").strip()
+                        if not (url_in.startswith("http://") or url_in.startswith("https://")):
+                            renderer.print_error("Cancelled — base URL must start with http:// or https://")
+                        else:
+                            renderer.print_info("API key — type it, or type none if this backend doesn't need one:")
+                            key_in = await controller.read_one() if controller else None
+                            key_in = (key_in or "").strip()
+                            cfg["base_url"] = url_in
+                            if key_in and key_in.lower() not in _NO_KEY_WORDS:
+                                cfg["api_key"] = key_in
+                            else:
+                                cfg.pop("api_key", None)
+                            storage.save_config(cfg)
+                            renderer.print_info(f"Backend set to {url_in}{' with API key' if key_in and key_in.lower() not in _NO_KEY_WORDS else ''}.")
+                elif spec.lower() == "reset":
+                    cfg.pop("base_url", None)
+                    cfg.pop("api_key", None)
+                    cfg.pop("models_path", None)
+                    storage.save_config(cfg)
+                    renderer.print_info(f"Backend reset to default ({api._DEFAULT_BASE}).")
+                elif spec.lower().startswith("models="):
+                    path_in = spec.split("=", 1)[1].strip()
+                    if path_in:
+                        cfg["models_path"] = "/" + path_in.strip("/")
+                        storage.save_config(cfg)
+                        renderer.print_info(f"Models endpoint set to {cfg['models_path']}.")
+                    else:
+                        renderer.print_error("Usage: /server models=<path>  e.g. /server models=/v1/models")
+                else:
+                    parts_srv = spec.split(None, 1)
+                    url = parts_srv[0]
+                    key = parts_srv[1].strip() if len(parts_srv) > 1 else None
+                    if not (url.startswith("http://") or url.startswith("https://")):
+                        renderer.print_error("Base URL must start with http:// or https://")
+                    else:
+                        cfg["base_url"] = url
+                        if key and key.lower() not in _NO_KEY_WORDS:
+                            cfg["api_key"] = key
+                        storage.save_config(cfg)
+                        renderer.print_info(f"Backend set to {url}{' with API key' if key and key.lower() not in _NO_KEY_WORDS else ''}.")
 
             elif cmd == "/context":
                 sub = arg.strip().lower()
