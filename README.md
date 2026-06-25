@@ -3,6 +3,7 @@
 # DeepCode v3
 
 [![Discord](https://img.shields.io/discord/0?label=Discord&logo=discord&logoColor=white&color=5865F2)](https://discord.gg/cgVa2rqWKv)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 
 A Claude-Code-style terminal coding agent, written in Python. Streams
 responses, runs file/shell tools behind a permission layer, multi-stage
